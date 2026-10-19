@@ -287,6 +287,31 @@ def test_zip_layout() -> None:
         check("no dev-only files shipped", not dev, str(dev))
 
 
+def test_path_diagnostics() -> None:
+    """A miss must explain itself.
+
+    The first real-hardware run reported only "no node": the panel could not
+    say where it had looked. A Decky plugin process inherits a minimal PATH
+    (Decky rewrites HOME but does not source a login shell), so this is the
+    likely failure mode and it must be self-diagnosing.
+    """
+    print("\nPath diagnostics")
+    src = open(os.path.join(REPO, "main.py"), encoding="utf-8").read()
+
+    check("resolver returns the candidate list it tried", "node_tried" in src)
+    check("resolver returns free-form diagnostics", '"diagnostics"' in src)
+    check("probe exposes the plugin's own PATH", "path_env" in src)
+    check("failure message names the minimal-PATH cause", "只继承精简的 PATH" in src)
+
+    # Coverage for the install layouts a package manager produces.
+    for layout in ["/usr/bin/node", "linuxbrew", "nix-profile", "/snap/bin",
+                   "/run/host/usr/bin", "fnm", "volta", "asdf"]:
+        check(f"node candidates cover {layout}", layout in src)
+
+    # A CLI entry from a global npm install is a .js file: it needs node.
+    check("CLI entry is prefixed with node", 'dsh.endswith(".js")' in src)
+
+
 def main_entry() -> int:
     checks = [
         test_url_regex,
@@ -301,6 +326,7 @@ def main_entry() -> int:
     for check_fn in checks:
         asyncio.run(check_fn())
     test_probe_matches_dsh()
+    test_path_diagnostics()
     test_zip_layout()
     print(f"\nAll {PASSED} checks passed.")
     return 0

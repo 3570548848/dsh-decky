@@ -63,10 +63,18 @@ type SandboxVerdict = {
 };
 
 type ProbeReply = {
-  node: { path: string | null; version?: string };
+  node: {
+    path: string | null;
+    version?: string;
+    source?: string | null;
+    tried?: { path: string; found: string }[] | null;
+  };
   dsh: { path: string | null; source: string };
+  diagnostics: string[];
+  path_env: string;
+  cwd: string;
   root_readonly: boolean | null;
-  bwrap: { path: string | null; usable: boolean; reason?: string } | null;
+  bwrap: { path: string | null; usable: boolean; reason?: string; argv?: string[] } | null;
   landlock: { path: string | null; usable: string; reason?: string } | null;
   sandbox_verdict: SandboxVerdict;
 };
@@ -322,6 +330,28 @@ function Content() {
             {verdict && !verdict.usable && verdict.advice && (
               <PanelSectionRow>
                 <Row label="沙箱不可用" value={verdict.advice} warn />
+              </PanelSectionRow>
+            )}
+            {!probe.node?.path && (
+              <PanelSectionRow>
+                <Row
+                  label="Node 未找到"
+                  value={
+                    "插件进程只继承精简的 PATH，不会加载你登录 shell 的环境。\n" +
+                    "它看到的 PATH：" + (probe.path_env || "(空)") + "\n" +
+                    "试过的位置（均未命中）：\n" +
+                    ((probe.node?.tried ?? []).map((t) => "  " + t.path).join("\n") ||
+                      "(无记录)") +
+                    "\n→ 在下面「高级设置」里手动填写 Node 路径（发行版包通常在 /usr/bin/node，" +
+                    "Homebrew 在 /home/linuxbrew/.linuxbrew/bin/node）。"
+                  }
+                  warn
+                />
+              </PanelSectionRow>
+            )}
+            {(probe.diagnostics ?? []).length > 0 && (
+              <PanelSectionRow>
+                <Row label="诊断" value={probe.diagnostics.join("\n")} />
               </PanelSectionRow>
             )}
           </>

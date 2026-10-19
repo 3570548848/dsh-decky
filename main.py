@@ -50,24 +50,59 @@ URL_LINE = re.compile(r"dsh web:\s*(https?://\S+)")
 # handheld, but a hung boot must not leave the panel spinning forever.
 STARTUP_TIMEOUT_S = 180.0
 
-# Where a userspace Node.js typically lands on an immutable-root distro.
+# Where a Node.js may land on a SteamOS-class system. Ordered by likelihood:
+# a distro/Homebrew install beats a per-user version manager, because the
+# Decky plugin process inherits only a minimal service PATH.
 NODE_CANDIDATES = [
+    # distro packages (ostree/overlay images) and /usr/local installs
+    "/usr/bin/node",
+    "/usr/local/bin/node",
+    "/bin/node",
+    # Homebrew on Linux — the usual "package manager" answer on Bazzite/SteamOS
+    "/home/linuxbrew/.linuxbrew/bin/node",
+    "~/.linuxbrew/bin/node",
+    # nix
+    "~/.nix-profile/bin/node",
+    "/nix/var/nix/profiles/default/bin/node",
+    # snap
+    "/snap/bin/node",
+    # distrobox exposes the host filesystem here, not the other way round
+    "/run/host/usr/bin/node",
+    # per-user version managers
     "~/.local/bin/node",
     "~/bin/node",
     "~/.nvm/versions/node/*/bin/node",
     "~/.local/share/nvm/versions/node/*/bin/node",
     "~/.local/share/fnm/node-versions/*/installation/bin/node",
-    "/usr/local/bin/node",
-    "/usr/bin/node",
+    "~/.volta/bin/node",
+    "~/.asdf/shims/node",
 ]
 
-# dsh entry points, in preference order.
+# dsh entry points. A global npm install usually has no `dsh` on PATH at all,
+# so the CLI entry (lib/bin.js) is resolved per Node prefix instead.
 DSH_CANDIDATES = [
+    "/usr/bin/dsh",
+    "/usr/local/bin/dsh",
+    "/home/linuxbrew/.linuxbrew/bin/dsh",
+    "~/.linuxbrew/bin/dsh",
     "~/.local/bin/dsh",
     "~/bin/dsh",
-    "/usr/local/bin/dsh",
-    "/usr/bin/dsh",
+    "/snap/bin/dsh",
+    "/run/host/usr/bin/dsh",
     "~/.dsh/bin/dsh",
+]
+
+# npm global prefixes to look for the CLI entry under, per Node install root.
+NODE_GLOBAL_PREFIXES = [
+    "/usr/lib/node_modules/@deepseek-ai/dsh",
+    "/usr/local/lib/node_modules/@deepseek-ai/dsh",
+    "/home/linuxbrew/.linuxbrew/lib/node_modules/@deepseek-ai/dsh",
+    "~/.linuxbrew/lib/node_modules/@deepseek-ai/dsh",
+    "~/.local/lib/node_modules/@deepseek-ai/dsh",
+    "~/.nvm/versions/node/*/lib/node_modules/@deepseek-ai/dsh",
+    "~/.local/share/nvm/versions/node/*/lib/node_modules/@deepseek-ai/dsh",
+    "~/.local/share/fnm/node-versions/*/installation/lib/node_modules/@deepseek-ai/dsh",
+    "~/.volta/tools/image/packages/@deepseek-ai/dsh/lib/node_modules/@deepseek-ai/dsh",
 ]
 
 
@@ -198,45 +233,93 @@ class Plugin:
         return expanded if os.path.isfile(expanded) and os.access(expanded, os.X_OK) else None
 
     def _resolve_paths(self) -> Dict[str, Optional[str]]:
+        """Locate node and dsh.
+
+        Returns the resolved pair plus the *diagnostics* needed to explain a
+        miss. A Decky plugin runs from a service process that inherits only a
+        minimal PATH (Decky rewrites HOME but does not source a login shell),
+        so "node is not found" is common and previously opaque — the panel
+        could only say "no node" without saying where it had looked.
+        """
+        diag: List[str] = []
+        tried: List[Dict[str, str]] = []
+
         node = self._config.get("node_path") or ""
+        node_src = None
         if node and os.access(os.path.expanduser(node), os.X_OK):
             node = os.path.expanduser(node)
+            node_src = "configured"
         else:
+            if node:
+                diag.append(f"配置的 node 路径不可执行：{node}")
             node = None
 
         if node is None:
             found = shutil.which("node")
             if found:
-                node = found
+                node, node_src = found, "PATH"
+
         if node is None:
             for candidate in NODE_CANDIDATES:
                 found = self._expand(candidate)
+                tried.append({"path": candidate, "found": found or ""})
                 if found:
-                    node = found
+                    node, node_src = found, "well-known"
                     break
 
         dsh = None
+        source = "configured"
         configured = self._config.get("dsh_path") or ""
         if configured:
             candidate = self._expand(configured)
             if candidate:
                 dsh = candidate
-        source = "configured"
+            else:
+                diag.append(f"配置的 dsh 路径不可执行：{configured}")
+
         if dsh is None:
             found = shutil.which("dsh")
             if found:
-                dsh = found
-                source = "PATH"
+                dsh, source = found, "PATH"
+
         if dsh is None:
             for candidate in DSH_CANDIDATES:
                 found = self._expand(candidate)
                 if found:
-                    dsh = found
-                    source = "well-known"
+                    dsh, source = found, "well-known"
                     break
+
+        # A global npm install often exposes no `dsh` on PATH; resolve the CLI
+        # entry under a known npm prefix instead. The entry is a JavaScript
+        # file, so `_build_argv` must prefix it with the node we found.
+        if dsh is None:
+            import glob as _glob
+
+            for prefix in NODE_GLOBAL_PREFIXES:
+                expanded = os.path.expanduser(prefix)
+                matches = sorted(_glob.glob(expanded)) if "*" in expanded else (
+                    [expanded] if os.path.isdir(expanded) else []
+                )
+                for base in matches:
+                    entry = os.path.join(base, "lib", "bin.js")
+                    if os.path.isfile(entry):
+                        dsh, source = entry, "npm-global"
+                        diag.append(f"找到 npm 全局 CLI 入口：{entry}")
+                        break
+                if source == "npm-global":
+                    break
+
         if dsh is None:
             source = "missing"
-        return {"node": node, "dsh": dsh, "source": source}
+
+        return {
+            "node": node,
+            "dsh": dsh,
+            "source": source,
+            "node_source": node_src,
+            "diagnostics": diag,
+            "node_tried": tried,
+        }
 
     # ------------------------------------------------------------------
     # Start / stop / status
@@ -259,32 +342,37 @@ class Plugin:
     def _build_argv(self, port: int) -> List[str]:
         """Assemble the dsh command line. Always --no-open (no desktop session)."""
         resolved = self._resolve_paths()
-        argv: List[str] = []
+        node = resolved.get("node")
         dsh = resolved.get("dsh")
-        if dsh:
-            argv = [dsh]
-        else:
-            node = resolved.get("node")
+
+        if dsh and dsh.endswith(".js"):
+            # npm-global resolution yields the CLI *entry*, which needs an
+            # interpreter. Without node we cannot run it.
             if not node:
                 raise RuntimeError(
-                    "找不到 Node.js。SteamOS 根文件系统只读，请把 Node 装到 $HOME "
-                    "(例如 nvm/fnm 或官方预编译包解到 ~/.local)，然后在设置里指定 node 路径。"
+                    "找到了 dsh 的 CLI 入口，但没有可用的 Node.js 来解释它：" + dsh
+                    + "。请在高级设置里手动填写 Node 路径。"
                 )
-            # Run the CLI entry directly from a global install.
-            for guess in (
-                "~/.local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
-                "/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
-                "/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
-            ):
-                expanded = os.path.expanduser(guess)
-                if os.path.isfile(expanded):
-                    argv = [node, expanded]
-                    break
-            if not argv:
+            argv = [node, dsh]
+        elif dsh:
+            # A real executable: it either carries a shebang or is a wrapper.
+            argv = [dsh]
+        else:
+            missing = resolved.get("diagnostics") or []
+            detail = ("\n" + "\n".join(missing)) if missing else ""
+            if node:
                 raise RuntimeError(
-                    "找不到 dsh 命令。请先安装 @deepseek-ai/dsh（npm i -g @deepseek-ai/dsh），"
-                    "或在设置里填写 dsh 可执行文件路径。"
+                    "找到了 Node（" + node + "），但找不到 dsh 命令。请先安装：\n"
+                    "  npm i -g @deepseek-ai/dsh\n"
+                    "或在高级设置里填写 dsh 路径。" + detail
                 )
+            raise RuntimeError(
+                "找不到 Node.js，也找不到 dsh。Decky 插件进程只继承精简的 PATH，"
+                "不会加载你登录 shell 的环境——即使桌面模式里能跑 node，这里也可能看不到。\n"
+                "请先确认 Node 装在哪（发行版包通常是 /usr/bin/node，Homebrew 是 "
+                "/home/linuxbrew/.linuxbrew/bin/node），然后在高级设置里手动填写路径。"
+                + detail
+            )
 
         argv += ["--profile", "web", "--no-open", "--port", str(port)]
         extra = (self._config.get("extra_args") or "").strip()
@@ -540,8 +628,15 @@ class Plugin:
 
         node = resolved.get("node")
         report: Dict[str, Any] = {
-            "node": {"path": node},
+            "node": {
+                "path": node,
+                "source": resolved.get("node_source"),
+                "tried": resolved.get("node_tried"),
+            },
             "dsh": {"path": resolved.get("dsh"), "source": resolved.get("source")},
+            "diagnostics": resolved.get("diagnostics") or [],
+            "path_env": os.environ.get("PATH", ""),
+            "cwd": os.getcwd(),
             "root_readonly": None,
             "bwrap": None,
             "landlock": None,
