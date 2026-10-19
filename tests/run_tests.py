@@ -203,6 +203,30 @@ async def test_sandbox_verdict() -> None:
     check("fail-closed when neither works", verdict(False, "unusable")["usable"] is False)
 
 
+def test_probe_matches_dsh() -> None:
+    """The probe must reproduce dsh's own runner probes, not a weaker version.
+
+    A reduced bwrap probe reports "usable" on hosts where dsh's real profile
+    fails, which would send the user into a broken command with the plugin
+    claiming everything was fine. These expectations mirror
+    `dsh-sandbox-local`'s `bwrapProfileArgs()`.
+    """
+    import re
+    print("\nProbe fidelity")
+    src = open(os.path.join(REPO, "main.py"), encoding="utf-8").read()
+    # The read-only profile dsh actually builds.
+    for arg in ['"--ro-bind", "/", "/"', '"--dev", "/dev"',
+                '"--unshare-pid"', '"--proc", "/proc"', '"--die-with-parent"']:
+        check(f"bwrap probe passes {arg.strip()}", arg in src)
+
+    # Landlock: dsh probes with --probe and reads the partial marker.
+    check("landlock probe uses --probe", '"--probe"' in src)
+    check("landlock probe detects the partial marker", "partially enforced" in src)
+
+    # The two rungs must not be conflated: bwrap wins, landlock is the fallback.
+    check("sandbox chain prefers bwrap", '"bwrap" if bwrap_ok else "landlock"' in src)
+
+
 async def test_root_readonly_detection() -> None:
     print("\nRoot filesystem probe")
     probe_file = "/usr/.dsh-decky-write-probe"
@@ -276,6 +300,7 @@ def main_entry() -> int:
     ]
     for check_fn in checks:
         asyncio.run(check_fn())
+    test_probe_matches_dsh()
     test_zip_layout()
     print(f"\nAll {PASSED} checks passed.")
     return 0

@@ -577,11 +577,32 @@ class Plugin:
 
         # bwrap: dsh's first-choice Linux runner. The real question is not
         # "does the binary exist" but "does it enforce a profile", so probe it
-        # the same way dsh does.
+        # EXACTLY as dsh does.
+        #
+        # These arguments mirror `bwrapProfileArgs()` in dsh-sandbox-local,
+        # which builds the read-only profile as:
+        #   --ro-bind / / --dev /dev --unshare-pid --proc /proc
+        #   --die-with-parent -- true
+        # A reduced probe (e.g. only `--ro-bind / / -- true`) would report
+        # "usable" on hosts where `--unshare-pid` or `--proc` cannot work, and
+        # the user would then hit a real failure inside dsh instead. Keep this
+        # list in sync with that function.
+        BWRAP_PROFILE_ARGS = [
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--unshare-pid",
+            "--proc", "/proc",
+            "--die-with-parent",
+        ]
         bwrap = shutil.which("bwrap") or shutil.which("bubblewrap")
         if bwrap:
-            result = await run([bwrap, "--ro-bind", "/", "/", "--", "true"])
-            report["bwrap"] = {"path": bwrap, "usable": result.get("ok", False), "detail": result}
+            result = await run([bwrap, *BWRAP_PROFILE_ARGS, "--", "true"])
+            report["bwrap"] = {
+                "path": bwrap,
+                "usable": result.get("ok", False),
+                "argv": ["bwrap", *BWRAP_PROFILE_ARGS, "--", "true"],
+                "detail": result,
+            }
         else:
             report["bwrap"] = {"path": None, "usable": False, "reason": "binary not on PATH"}
 
