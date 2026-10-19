@@ -1,0 +1,4 @@
+#!/bin/bash
+echo "engine: starting up"
+echo "engine: fatal error, no URL will be printed" >&2
+exit 7

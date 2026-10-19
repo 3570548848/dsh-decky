@@ -1,0 +1,17 @@
+#!/bin/bash
+# Stand-in for `dsh --profile web --no-open --port N`
+port=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --port) port="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+echo "fake: booting engine on ${port}"
+# bind the port so the plugin's readiness probe succeeds
+node -e 'require("net").createServer(()=>{}).listen(process.argv[1])' "$port" &
+SRV=$!
+sleep 0.4
+echo "dsh web: http://127.0.0.1:${port}/?token=FAKETOKEN123"
+echo "dsh web: opening the default browser; pass --no-open to disable"
+wait $SRV

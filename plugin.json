@@ -1,0 +1,11 @@
+{
+  "name": "DSH Launcher",
+  "author": "DSHA",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["dsh", "deepseek", "ai", "agent", "terminal"],
+    "description": "Run and open the DeepSeek Harness (dsh) web agent inside Steam Gaming Mode, without switching to Desktop Mode.",
+    "image": "https://raw.githubusercontent.com/deepseek-ai/DeepSeek-Harness/master/docs/assets/logo.png"
+  }
+}
