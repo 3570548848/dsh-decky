@@ -64,19 +64,37 @@ verified by test.
 
 ### 1. Get Node.js and dsh onto the device (once)
 
-The root filesystem is read-only, so `apt`/`dnf` will not work. Install into `$HOME`:
+The root filesystem is read-only (an overlay may make `/` look writable while `/usr` stays
+unwritable and reverts on reboot), so `apt`/`dnf`/`pacman` are not reliable. **Install into `$HOME`**:
 
 ```bash
-# Option A: nvm (a SteamOS-aware variant exists: steamdeck-nvm)
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source ~/.bashrc
-nvm install 24            # dsh wants Node >= 20; 22.x or 24.x is best
+# Option A: nvm -- do NOT hardcode a version; ask for the latest tag first
+NVM_VER=$(curl -s https://api.github.com/repos/nvm-sh/nvm/releases/latest \
+  | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+echo "installing nvm $NVM_VER"
+curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VER/install.sh" | bash
 
-# Option B: fnm, or unpack an official prebuilt tarball into ~/.local
+# Close and reopen the terminal (so nvm's environment is loaded), then:
+nvm install --lts        # dsh wants Node >= 20; LTS is the stable line
+nvm use --lts
+node -v
 
 npm i -g @deepseek-ai/dsh
 dsh --version             # confirm it runs
 ```
+
+> If `raw.githubusercontent.com` is unreachable (some networks block it), install via git:
+> ```bash
+> git clone --depth 1 https://github.com/nvm-sh/nvm.git ~/.nvm && cd ~/.nvm && ./install.sh
+> ```
+
+> **Record the output of `which node`** (e.g. `/home/deck/.nvm/versions/node/v24.x.x/bin/node`).
+> A Decky plugin process inherits only a minimal PATH and **cannot see an nvm from your login
+> shell**; if the probe reports no Node, put that path into the plugin's Advanced settings.
+
+> Option B: fnm, or unpack an official prebuilt tarball into `~/.local`. A distro package is fine
+> too if your system really persists writes to `/usr` — the plugin discovers paths on its own and
+> lets you override them explicitly.
 
 > If your system reports `/usr` as writable, a distro package is fine too — the plugin discovers
 > whatever it can and lets you override the paths explicitly.
@@ -132,9 +150,20 @@ unzip dsh-decky.zip -d ~/homebrew/plugins/
 - **Not rendered inside the Decky panel.** The GUI opens in Steam's browser, not as an embedded
   panel, because the `SameSite=Strict` cookie rules out framing. This is a deliberate consequence
   of dsh's auth model, not an oversight.
-- **Untested on hardware.** Written and verified against the real package sources, and its backend
-  logic is exercised by the tests below — but it has **not** been run on a physical SteamOS/ROG Ally
-  device. Expect to iterate on the first boot.
+- **Verified on real hardware.** On 2026-10-19 it was exercised on a SkorionOS / first-gen ROG Ally
+  (x86_64): the plugin loads, the QAM panel works, the environment probe runs, and it **started the
+  engine and opened the DSH GUI inside Steam's built-in browser**. Findings:
+  - **`bwrap` is usable** → the first sandbox rung passes, so `danger-full-access` is **not** needed
+    (`Landlock` reporting unusable is harmless: the Linux chain is `bwrap` → `landlock`, and
+    passing the first rung is enough).
+  - **`/` reported writable** → the usual "SteamOS root is read-only" assumption did not hold; yet
+    `/usr` may still be unwritable or revert on reboot, so installing Node under `$HOME` remains the
+    recommendation.
+  - **Node discovery was a real pitfall** → the plugin process only inherits a minimal PATH and
+    cannot see an nvm configured in the login shell. Since 0.1.1 the probe shows the actual PATH
+    and the paths it tried, and covers Homebrew/nix/snap/distrobox layouts.
+- **Still unverified.** Engine-side end-to-end behaviour (executing commands under Gaming Mode, long
+  sessions, resume from suspend) is not sufficiently covered yet. Cold boot is slow — allow 1–3 min.
 - **Cold boot is slow.** `dsh` resolves a large dependency graph on first run. `STARTUP_TIMEOUT_S`
   (180 s) bounds the wait and reports the engine's tail output on failure.
 - **Gamepad input in Steam's browser** is Steam's own to manage; this plugin does not add gamepad
@@ -171,7 +200,7 @@ Three real defects were found and fixed this way, rather than by inspection:
 | `plugin.json` | Decky manifest (no `root` flag) |
 | `main.py` | Decky backend: discovery, launch, URL capture, probe, settings |
 | `src/index.tsx` | QAM panel UI |
-| `tests/run_tests.py` | 47 offline checks (run without a Deck) |
+| `tests/run_tests.py` | 68 offline checks (run without a Deck) |
 | `package.sh` | Builds `dsh-decky.zip` in the Decky-required layout |
 | `tsconfig.json`, `rollup.config.js`, `package.json` | Build toolchain |
 

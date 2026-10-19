@@ -44,21 +44,35 @@
 
 ### 1. 先把 Node.js 与 dsh 装到设备上（只需一次）
 
-根文件系统是只读的，所以 `apt`/`dnf` 不会生效。请装到 `$HOME`：
+根文件系统是只读的（`/` 可能因 overlay 显示为可写，但 `/usr` 通常仍不可写、且重启会丢），所以 `apt`/`dnf`/`pacman` 未必可靠。**推荐装到 `$HOME`**：
 
 ```bash
-# 方案 A：nvm（有适配 SteamOS 的分支：steamdeck-nvm）
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source ~/.bashrc
-nvm install 24            # dsh 要求 Node >= 20；22.x 或 24.x 最稳妥
+# 方案 A：nvm —— 不要写死版本号，先取最新 tag 再装
+NVM_VER=$(curl -s https://api.github.com/repos/nvm-sh/nvm/releases/latest \
+  | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+echo "即将安装 nvm $NVM_VER"
+curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VER/install.sh" | bash
 
-# 方案 B：fnm，或把官方预编译压缩包解到 ~/.local
+# 关闭终端重开（让 nvm 的环境变量生效），然后：
+nvm install --lts        # dsh 要求 Node >= 20；用 LTS 稳定线
+nvm use --lts
+node -v
 
 npm i -g @deepseek-ai/dsh
 dsh --version             # 确认能跑起来
 ```
 
-> 如果你的系统显示 `/usr` 可写，用发行版软件包也可以——插件会自行发现路径，也允许你在设置里显式覆盖。
+> 若 `raw.githubusercontent.com` 不通（部分网络环境下该域名不可达），改用 git 安装：
+> ```bash
+> git clone --depth 1 https://github.com/nvm-sh/nvm.git ~/.nvm && cd ~/.nvm && ./install.sh
+> ```
+
+> **务必记下 `which node` 的输出**（形如 `/home/deck/.nvm/versions/node/v24.x.x/bin/node`）。
+> Decky 插件进程只继承精简的 PATH，**看不到你登录 shell 里的 nvm**；若自检报找不到 Node，
+> 就把这个路径填进插件的「高级设置」。
+
+> 方案 B：fnm，或把官方预编译压缩包解到 `~/.local`。若你的发行版能持久地写 `/usr`，
+> 用软件包管理器也可以——插件会自行发现路径，也允许在设置里显式覆盖。
 
 ### 2. 打包插件
 
@@ -102,7 +116,11 @@ unzip dsh-decky.zip -d ~/homebrew/plugins/
 ## 已知限制（依赖它之前请先读）
 
 - **界面不渲染在 Decky 面板内。** 图形界面在 Steam 浏览器里打开，而不是内嵌面板，因为 `SameSite=Strict` Cookie 排除了 iframe 方案。这是 dsh 鉴权模型的必然结果，不是疏漏。
-- **未在真实硬件上测试。** 它是照着真实包源码写并验证的，后端逻辑也有下方测试覆盖——但它**尚未**在实体 SteamOS / ROG Ally 设备上跑过。首次启动请预期需要调试。
+- **已在真机上跑通。** 2026-10-19 在 SkorionOS / ROG Ally 初代（x86_64）上实测：插件正常加载、QAM 面板可用、环境自检可运行，**并能启动引擎、在 Steam 自带浏览器里打开 DSH 图形界面**。以下为实测结论：
+  - **`bwrap` 可用** → 沙箱第一级通过，**不需要** `danger-full-access`（`Landlock` 报不可用无妨，Linux 链是 `bwrap` → `landlock`，前级通过即可）。
+  - **`/` 显示为可写** → 推翻了「SteamOS 根必只读」的通用假设；但 `/usr` 可能仍不可写、或重启即丢，因此安装 Node 仍建议落在 `$HOME`。
+  - **Node 路径发现曾是坑** → 插件进程只继承精简 PATH，看不到登录 shell 的 nvm。0.1.1 起自检会显示真实 PATH、试过的路径，并覆盖 Homebrew/nix/snap/distrobox 等落点。
+- **仍有未覆盖项。** 引擎侧的端到端能力（在游戏模式下真正执行命令、长会话、休眠恢复）尚未充分验证；首次冷启动较慢，请预留 1–3 分钟。
 - **冷启动较慢。** `dsh` 首次运行要解析一大片依赖图。`STARTUP_TIMEOUT_S`（180 秒）限制了等待上限，失败时会回报引擎的输出尾部。
 - **Steam 浏览器内的手柄输入**由 Steam 自己管理；本插件不额外提供手柄绑定或虚拟键盘。
 - **端口复用无法找回令牌。** 若端口已被另一个 dsh 实例占用，插件只能把浏览器指过去；一个从未鉴权过的浏览器，拿不到该实例的启动 URL 就无法生成 Cookie。
@@ -130,7 +148,7 @@ PYTHONPATH=tests python3 tests/run_tests.py
 | `plugin.json` | Decky 清单（不含 `root` 标志） |
 | `main.py` | Decky 后端：路径发现、启动、URL 捕获、环境探测、设置读写 |
 | `src/index.tsx` | 快速访问菜单（QAM）面板界面 |
-| `tests/run_tests.py` | 47 项离线检查（无需掌机） |
+| `tests/run_tests.py` | 68 项离线检查（无需掌机） |
 | `package.sh` | 按 Decky 要求的布局生成 `dsh-decky.zip` |
 | `tsconfig.json`、`rollup.config.js`、`package.json` | 构建工具链 |
 
