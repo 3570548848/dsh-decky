@@ -1,166 +1,179 @@
-# DSH Launcher — 面向 SteamOS 系掌机的 Decky Loader 插件
+# DSH Launcher
+
+**在 Steam 游戏模式里用上 DSH 的 Web Agent —— 不用切桌面模式。**
+
+[![Decky](https://img.shields.io/badge/Decky-Loader-1a9fff)](https://github.com/SteamDeckHomebrew/decky-loader)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 简体中文 | [English](README.en.md)
 
-在 **Steam 游戏模式（Gaming Mode）** 里运行 **DeepSeek Harness（`dsh`）** 的 Web Agent，并用 Steam 自带的浏览器打开它的图形界面——不必切到桌面模式，也不依赖 `xdg-open`。
-
-顺带回答那个问题：*「能不能做一个适用于 SteamOS 的 dsh 插件？」*——`dsh` 引擎本身**不需要移植**：它是纯 JavaScript，没有 `os`/`cpu` 限制，Linux x64/arm64 的预编译件也都发布在 npm 上。SteamOS 真正需要的是一层**启动 / 适配层**，也就是本插件。（注意：*DSH* 插件与 *Decky* 插件是两套不同的插件生态，本仓库是 **Decky** 插件。）
+![两种打开方式演示](docs/ab-demo.gif)
 
 ---
 
-## 已核实的事实
+## 这是什么
 
-以下每条都从真实安装包里读出来，不是凭记忆。来源：`@deepseek-ai/dsh` 0.2.1-rc.2、`@decky/ui` 4.15.1、`@decky/api` 1.1.3、官方 `decky-plugin-template`，以及 [jessebofill/DeckWebBrowser](https://github.com/jessebofill/DeckWebBrowser)。
+[DeepSeek Harness（`dsh`）](https://github.com/deepseek-ai/DeepSeek-Harness) 是个强大的 Agent 运行时，但它得靠浏览器界面来用。而在 SteamOS 掌机的**游戏模式**下，没有桌面会话 —— 没有浏览器可以打开，`dsh` 默认的 `xdg-open` 交接也失效。
 
-| 事实 | 影响 | 证据 |
+这个插件解决的就是这一步：**在游戏模式里把 dsh 跑起来，并把界面送到你眼前。**
+
+- 一键从快速访问菜单（QAM）启动/停止引擎
+- 环境自检：告诉你 Node/dsh 在哪、沙箱能不能用
+- 两种打开方式可选（见下）
+- 6 秒内热更新；停止是显式动作，不会因插件重载而杀掉你的会话
+
+> **它是 DSH 插件吗？** 不是。这是 **Decky Loader 插件** —— 两套不同的插件生态。
+> 另外，**`dsh` 引擎本身不需要移植**：它是纯 JavaScript，无 `os`/`cpu` 限制，Linux x64/arm64 的预编译件都已发布在 npm 上。SteamOS 缺的只是一层**启动适配层**，也就是本插件。
+
+## 两种打开方式
+
+两者都是**顶层导航**，因此都满足 dsh 的 `SameSite=Strict` Cookie 要求。
+
+| | 方式 A · Steam 内置浏览器（默认） | 方式 B · 外部浏览器独立窗口 |
 |---|---|---|
-| `@deepseek-ai/dsh` 未声明 `os`/`cpu` 限制；依赖里含 `@deepseek-ai/node-addon-system-linux-x64` | **无需为 DSH 内核做移植。** Linux x64 本就是受支持的目标平台 | `0.2.1-rc.2` 的 npm 元数据 |
-| `dsh web` 会向 stdout 打印 `dsh web: <authenticated-url>` | 启动令牌只出现在这一行，必须解析它 | `dsh-web-app/lib/index.js:162` |
-| `dsh` 通过 `?token=` 鉴权，随后下发 **绑定到该 authority 的** `HttpOnly; SameSite=Strict` Cookie | 界面**必须**在真实浏览上下文里以顶层导航打开。用 `<iframe>` 属同站跨源，到达时**不带 Cookie**，等于未鉴权 | `dsh-client-connection/lib/index.js:348`（`sessionCookie`） |
-| `dsh web` 的浏览器交接走 `open` 包 → `xdg-open`；加 `--no-open` 即跳过 | 游戏模式没有桌面会话，所以**必须始终以 `--no-open` 启动**、由我们自己打开 URL | `dsh-web-app/lib/index.js:156-169` |
-| Linux 沙箱链是 `bwrap` → `landlock`；若两者探测都失败，则**直接拒绝执行（fail-closed，报 `SANDBOX_UNAVAILABLE`）**，不会静默地无约束放行 | 一台看起来正常的掌机也可能拒绝任何命令。两者都要探测，并把修复办法讲清楚 | `dsh-sandbox-local`：`PLATFORM_CHAINS.linux = ["bwrap","landlock"]` |
-| `danger-full-access` **完全绕过 `ctx.sandbox`**（走 `super.execute`，`denied: false`） | 当机器上没有可用沙箱执行器时的应急出口 | `dsh-bash-sandbox/lib/index.js:68`；其 README 第 173 行 |
-| Linux 上 node-pty 走 `forkpty()`；`spawn-helper` 仅 `#if defined(__APPLE__)` 时使用 | Linux 的 PTY **不需要**额外垫片；`prebuilds/linux-x64/pty.node` 随包发布 | `node-pty/src/unix/pty.cc:393` |
-| `koffi`（FFI）只在 Win32 路径上经 `createLazyRequire` 加载 | 非 Windows 永不加载它，无需构建 FFI | `dsh-win32-process/lib/index.js:25` |
-| Decky 的 `plugin.json` 中 `flags` 可写 `root`，会让**后端以 root 身份运行** | **本插件刻意不使用它**——见下方「安全」一节 | `decky.pyi` 第 29/37 行 |
+| 做法 | `Navigation.NavigateToExternalWeb(url)`，交给 Steam 自己的浏览器 | 插件启动真实浏览器：Chromium 系 `--app=<url>`；Firefox 系 `--kiosk <url>` |
+| 形态 | 在 Steam 浏览器里打开 | 无地址栏窗口，**盖在 Gaming Mode 之上** |
+| 依赖 | Steam 未公开 API（`CreateBrowserView` 等） | **完全绕开** Steam 私有 API |
+| 抗更新 | 较弱（Steam 升级可能失效） | **较强**（用的是标准浏览器） |
+| 前提 | Steam 自带浏览器可用 | 设备上装着浏览器（含 flatpak 版） |
 
-## 设计思路与理由
+方式 B 会自动探测浏览器：原生路径（`/usr/bin`、Homebrew、nix、snap）→ flatpak。面板里有「探测可用浏览器」按钮可直接查看。
 
-**启动。** 后端在**独立进程组**里拉起 `dsh --profile web --no-open --port <N>`，持续读取 stdout，解析出打印的带令牌 URL。之后它会**先等端口真正能接受连接**再把 URL 交出去——因为打印那一行发生在端口绑定之前，只看那一行就打开会有竞态。
-
-**打开（两种方式，可按设置切换）。** 两种都满足 `SameSite=Strict` 的要求，因为两者都是**顶层导航**：
-
-- **方式 A · Steam 内置浏览器**（默认）：前端调用 `Navigation.NavigateToExternalWeb(url)`（来自 `@decky/ui`），把 URL 交给 Steam 自带浏览器。
-- **方式 B · 外部浏览器独立窗口**：插件自己启动一个真实浏览器，以无地址栏的窗口显示该 URL。
-  - Chromium 系（chromium / chrome / edge / brave / vivaldi）用 `--app=<url>`
-  - Firefox 系**没有 `--app`**，用 `--kiosk <url>`
-  - 探测顺序：原生路径（`/usr/bin`、Homebrew、nix、snap）→ **flatpak**（先 `flatpak info` 试探，再 `flatpak run`）
-  - **必须显式注入 GUI 环境变量**（`DISPLAY`、`WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR`）：插件是服务进程，通常继承不到这些变量，缺了浏览器就起不来或不可见
-  - 这条路**完全绕开 Steam 未公开 API**（`CreateBrowserView` / `findModuleChild`），因此比方式 A 更抗 Steam 更新；代价是窗口**盖在 Gaming Mode 之上**，而非嵌在面板里
-
-> 为什么不用 `<iframe>`：dsh 的会话 Cookie 是 `SameSite=Strict`，iframe 属同站跨源，到达时**不带 Cookie**，界面出不来。
-
-**存活。** `_unload` 刻意**不**停止引擎。插件重载、或 Steam 从休眠恢复，都不该杀掉正在进行的 Agent 会话。停止是一个明确的用户动作。
-
-**绝不越界。** 如果端口已经在服务（比如 systemd 单元、手工起的进程），插件会把它报为**外部实例**、标记 `managed: false`，并且 **`stop()` 不会去杀它**——这一点有测试覆盖。
-
-## 安全
-
-- **不使用 `root` 标志。** 插件以普通用户身份运行引擎，不触碰任何特权操作。让 Agent 以 root 运行，意味着 root 属主的文件会悄悄出现在你的家目录里；而 Decky 插件属于第三方代码——能满足功能的最小权限才是正确选择。
-- **不读取、不存储任何凭据。** 插件从不打开 `~/.dsh` 里的密钥；启动令牌是从引擎自己的 stdout 解析出来的，直接交给 Steam 浏览器。
-- `danger-full-access` 是**有文档说明的应急出口**，不是默认值。它会关闭 Agent 每条命令的文件约束。只有在环境自检报告两个沙箱执行器都不可用、并且你接受无约束执行时，才应启用。
+> **为什么不能用 `<iframe>` 内嵌？**
+> dsh 的会话 Cookie 是 `HttpOnly; SameSite=Strict` 且绑定到具体 authority。iframe 属同站跨源，到达时**不带 Cookie**，界面根本出不来。
 
 ## 安装
 
-### 1. 先把 Node.js 与 dsh 装到设备上（只需一次）
+### 第一步：设备上装好 Node.js 与 dsh
 
-根文件系统是只读的（`/` 可能因 overlay 显示为可写，但 `/usr` 通常仍不可写、且重启会丢），所以 `apt`/`dnf`/`pacman` 未必可靠。**推荐装到 `$HOME`**：
+> 根文件系统通常只读（`/` 可能因 overlay 显示为可写，但 `/usr` 多半仍不可写、重启即丢）。**推荐装到 `$HOME`。**
 
-```bash
-# 方案 A：nvm —— 不要写死版本号，先取最新 tag 再装
+```sh
+# 装 nvm —— 注意不要写死版本号，先取最新 tag
 NVM_VER=$(curl -s https://api.github.com/repos/nvm-sh/nvm/releases/latest \
   | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-echo "即将安装 nvm $NVM_VER"
 curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VER/install.sh" | bash
 
-# 关闭终端重开（让 nvm 的环境变量生效），然后：
-nvm install --lts        # dsh 要求 Node >= 20；用 LTS 稳定线
-nvm use --lts
+# 关掉终端重开（让 nvm 环境变量生效），然后：
+nvm install --lts && nvm use --lts
 node -v
 
 npm i -g @deepseek-ai/dsh
-dsh --version             # 确认能跑起来
+dsh --version
 ```
 
-> 若 `raw.githubusercontent.com` 不通（部分网络环境下该域名不可达），改用 git 安装：
-> ```bash
-> git clone --depth 1 https://github.com/nvm-sh/nvm.git ~/.nvm && cd ~/.nvm && ./install.sh
-> ```
-
-> **务必记下 `which node` 的输出**（形如 `/home/deck/.nvm/versions/node/v24.x.x/bin/node`）。
-> Decky 插件进程只继承精简的 PATH，**看不到你登录 shell 里的 nvm**；若自检报找不到 Node，
-> 就把这个路径填进插件的「高级设置」。
-
-> 方案 B：fnm，或把官方预编译压缩包解到 `~/.local`。若你的发行版能持久地写 `/usr`，
-> 用软件包管理器也可以——插件会自行发现路径，也允许在设置里显式覆盖。
-
-### 2. 打包插件
-
-打包脚本会产出可直接安装的压缩包：
-
-```bash
-bash package.sh          # 生成 ../dsh-decky.zip
+若 `raw.githubusercontent.com` 不可达，改用 git：
+```sh
+git clone --depth 1 https://github.com/nvm-sh/nvm.git ~/.nvm && cd ~/.nvm && ./install.sh
 ```
 
-前提是 `dist/index.js` 已存在。它已随本仓库提交；若要从 `src/index.tsx` 重新构建，你需要一台能运行 `@decky/rollup` 的主机：
+> ⚠️ **记下 `which node` 的输出**（如 `/home/deck/.nvm/versions/node/v24.x.x/bin/node`）。
+> Decky 插件是服务进程，**只继承精简的 PATH、看不到你登录 shell 里的 nvm**。若自检报找不到 Node，把这个路径填进插件「高级设置」。
 
-```bash
+### 第二步：装插件
+
+```sh
+curl -L -o dsh-decky.zip \
+  https://github.com/3570548848/dsh-decky/releases/download/v0.1.2/dsh-decky.zip
+```
+
+- **Decky 界面**：设置 → 开发者 → 从 zip 安装插件 → 重载 loader
+- **手动**：`unzip dsh-decky.zip -d ~/homebrew/plugins/`
+
+> 请**明确用 v0.1.2**，不要用 `/releases/latest`：后者目前指向 v0.1.1（不含方案 B），因为 v0.1.2 标着 prerelease 被跳过了。
+
+压缩包内必须是**恰好一层顶层目录**（`dsh-decky/plugin.json`）——这是 Decky 安装器 `extractall` 的硬性要求，打包脚本与测试都会校验。
+
+### 第三步：首次运行
+
+1. QAM → **DSH Launcher**
+2. 点 **环境自检**，看三项：
+   - **Node.js / dsh** ——解析到的路径；显示「未找到」就去高级设置手填
+   - **bwrap / Landlock** ——若都不可用，把权限档位设为 `danger-full-access`（并弄清其含义），或安装 `bubblewrap`
+   - **`/` 是否只读** ——告诉你该往哪装
+3. 点 **启动并打开 DSH**。首次冷启动约 1–3 分钟，引擎输出可在「高级 → 查看引擎输出」看到
+
+## 安全
+
+- **不使用 `root` 标志。** 插件以普通用户身份运行引擎。Decky 支持让后端以 root 运行，但那样 Agent 会在你家目录里留下 root 属主文件——第三方插件用能满足功能的最小权限才对。
+- **不读取、不存储任何凭据。** 插件从不打开 `~/.dsh` 里的密钥；启动令牌只是从引擎 stdout 解析出来交给浏览器。
+- **`danger-full-access` 是有文档说明的应急出口**，不是默认值。它会解除 Agent 每条命令的文件约束，只应在沙箱执行器确实不可用时启用。
+
+## 已知限制
+
+- **界面不在 Decky 面板内**（方式 A/B 都不是内嵌）——`SameSite=Strict` 排除了 iframe。这是 dsh 鉴权模型的必然结果。
+- **方式 B 尚未实机验证**：`--app`/`--kiosk` 启动、GUI 环境变量注入、以及在 Gaming Mode 下窗口能否正常显示，都还没在真机上跑过。
+- **冷启动较慢**：首次运行要解析大片依赖图，超时上限 180 秒。
+- **端口复用拿不回令牌**：若端口已被**别的** dsh 实例占用，插件拿不到它的启动令牌（令牌随机生成、仅存内存），浏览器也就无法鉴权。此时**换个端口**（如 3081）即可。
+- **手柄输入**在 Steam 浏览器内由 Steam 管理；本插件不提供额外的按键绑定或虚拟键盘。
+- 引擎侧端到端（游戏模式下执行命令、长会话、休眠恢复）**仍未充分验证**。
+
+## 设计要点与依据
+
+以下每条都从真实安装包源码读出，而非凭记忆。来源：`@deepseek-ai/dsh` 0.2.1-rc.2、`@decky/ui` 4.15.1、`@decky/api` 1.1.3、官方 `decky-plugin-template`、[jessebofill/DeckWebBrowser](https://github.com/jessebofill/DeckWebBrowser)。
+
+<details>
+<summary><b>关键事实与证据（点击展开）</b></summary>
+
+| 事实 | 影响 | 证据 |
+|---|---|---|
+| `@deepseek-ai/dsh` 未声明 `os`/`cpu`；依赖含 `node-addon-system-linux-x64` | 无需为 DSH 内核移植 | `0.2.1-rc.2` npm 元数据 |
+| `dsh web` 向 stdout 打印 `dsh web: <url>` | 启动令牌只出现在这一行 | `dsh-web-app/lib/index.js:162` |
+| 鉴权用 `?token=`，随后下发**绑定 authority** 的 `HttpOnly; SameSite=Strict` Cookie | 界面**必须**顶层导航；iframe 拿不到 Cookie | `dsh-client-connection/lib/index.js:348` |
+| 浏览器交接走 `open` → `xdg-open`；`--no-open` 跳过 | 游戏模式无桌面会话，**必须 `--no-open`** | `dsh-web-app/lib/index.js:156-169` |
+| Linux 沙箱链 `bwrap` → `landlock`；都失败则 **fail-closed** 拒绝执行 | 正常的掌机也可能拒绝任何命令 | `dsh-sandbox-local`：`PLATFORM_CHAINS.linux` |
+| `danger-full-access` 完全绕过 `ctx.sandbox` | 无可沙箱执行器时的应急出口 | `dsh-bash-sandbox/lib/index.js:68` |
+| Linux 上 node-pty 走 `forkpty()`（`spawn-helper` 仅 macOS） | Linux PTY 无需额外垫片 | `node-pty/src/unix/pty.cc:393` |
+| `koffi` 只在 Win32 惰性加载 | 非 Windows 无需构建 FFI | `dsh-win32-process/lib/index.js:25` |
+| Decky `flags` 可写 `root` → 后端以 root 运行 | **本插件刻意不用** | `decky.pyi` 29/37 行 |
+
+</details>
+
+<details>
+<summary><b>启动与打开的实现细节（点击展开）</b></summary>
+
+**启动。** 后端在**独立进程组**里拉起 `dsh --profile web --no-open --port <N>`，持续读 stdout 解析带令牌 URL。之后**先等端口真能接受连接**才把 URL 交出去——打印那一行发生在端口绑定之前，只看它会有竞态。
+
+**打开。** 见上文两种方式。方式 B 的浏览器探测顺序为原生路径 → flatpak（先 `flatpak info` 试探，再 `flatpak run`），并**显式注入 GUI 环境变量**（`DISPLAY`、`WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR`）——插件是服务进程，通常继承不到，缺了浏览器起不来或不可见。
+
+**存活。** `_unload` 刻意**不**停引擎。插件重载、Steam 从休眠恢复，都不该杀掉进行中的 Agent 会话。停止是明确的用户动作。
+
+**绝不越界。** 端口已被别的实例占用时，报为**外部实例**、标 `managed: false`，且 **`stop()` 不会去杀它**——有测试覆盖。
+
+</details>
+
+## 开发
+
+```sh
 pnpm install
-pnpm run build
+pnpm run build      # 构建 src/index.tsx → dist/index.js
+bash package.sh     # 按 Decky 要求布局打包 → ../dsh-decky.zip
+PYTHONPATH=tests python3 tests/run_tests.py    # 80 项离线检查，无需掌机
 ```
 
-> `@rollup/rollup-linux-x64-musl` 被固定为开发依赖，因为 Decky 的构建通常在 Linux x64 上进行；在其它主机上该可选依赖会被跳过。不过本项目已在 `linux/android arm64`（`@rollup/rollup-android-arm64`）上构建并验证通过。
+后端是纯 Python，只依赖一个被 stub 的 `decky` 模块，因此**逻辑可脱离设备测试**。
 
-### 3. 部署到 Decky
+覆盖范围：URL 捕获、重复启动、URL 行过滤（「opening the default browser」会被正确**排除**）、配置往返、始终带 `--no-open`、`extra_args` 的 argv 处理、报 URL 前进程死亡的干净报错、`stop()` 不杀外部实例、zip 的 Decky 目录规则、方案 B 的启动参数与 GUI 环境注入。
 
-Decky 自带的安装器执行的是 `ZipFile(...).extractall(~/homebrew/plugins)`，所以压缩包里**必须恰好只有一层顶层目录**、且 `plugin.json` 位于深度 1——`package.sh` 保证了这一点，README 配套的测试套件也会校验。
+**测试抓出的真实缺陷**（并非肉眼检查发现）：
 
-```bash
-# 走 Decky 界面：设置 → 开发者 → 从 zip 安装插件，选中 dsh-decky.zip
-# 然后重载 loader。
+1. **死锁** —— `start()` 调用 `stop()`，重入不可重入的 `asyncio.Lock`
+2. **误导的退出码** —— stdout 泵报 `exit=None`，因为进程回收前 EOF 已到
+3. **1.4 MB sourcemap** —— `@decky/rollup` 的选项合并由**默认值**胜出，必须改返回值而非传参
+4. **属性遮蔽方法** —— `self._browser_argv` 把同名方法遮住，调用报 `NoneType not callable`
+5. **死配置** —— `open_with` 早已声明却从未被后端读取，等于宣告了一个不存在的选项
 
-# 或手动：
-unzip dsh-decky.zip -d ~/homebrew/plugins/
-# → ~/homebrew/plugins/dsh-decky/{plugin.json,package.json,main.py,dist/index.js,py_modules/}
-```
-
-### 4. 首次运行
-
-1. 打开快速访问菜单（Quick Access Menu）→ **DSH Launcher**。
-2. 点 **环境自检（environment probe）**，看结果：
-   - **Node.js / dsh** ——解析到的路径。若显示「未找到」，去高级设置里填上。
-   - **/ 只读** ——SteamOS 上应为 `true`；它告诉你该往哪儿装。
-   - **bwrap / Landlock** ——若两者都不可用，把权限档位设为 `danger-full-access`（并弄清这意味着什么），或安装 `bubblewrap`。
-3. 点 **启动并打开 DSH（start and open）**。首次冷启动可能耗时 1–3 分钟；引擎输出可在 高级 →「查看引擎输出」里看到。
-
-## 已知限制（依赖它之前请先读）
-
-- **界面不渲染在 Decky 面板内。** 图形界面在 Steam 浏览器里打开，而不是内嵌面板，因为 `SameSite=Strict` Cookie 排除了 iframe 方案。这是 dsh 鉴权模型的必然结果，不是疏漏。
-- **已在真机上跑通。** 2026-10-19 在 SkorionOS / ROG Ally 初代（x86_64）上实测：插件正常加载、QAM 面板可用、环境自检可运行，**并能启动引擎、在 Steam 自带浏览器里打开 DSH 图形界面**。以下为实测结论：
-  - **`bwrap` 可用** → 沙箱第一级通过，**不需要** `danger-full-access`（`Landlock` 报不可用无妨，Linux 链是 `bwrap` → `landlock`，前级通过即可）。
-  - **`/` 显示为可写** → 推翻了「SteamOS 根必只读」的通用假设；但 `/usr` 可能仍不可写、或重启即丢，因此安装 Node 仍建议落在 `$HOME`。
-  - **Node 路径发现曾是坑** → 插件进程只继承精简 PATH，看不到登录 shell 的 nvm。0.1.1 起自检会显示真实 PATH、试过的路径，并覆盖 Homebrew/nix/snap/distrobox 等落点。
-- **仍有未覆盖项。** 引擎侧的端到端能力（在游戏模式下真正执行命令、长会话、休眠恢复）尚未充分验证；首次冷启动较慢，请预留 1–3 分钟。
-- **冷启动较慢。** `dsh` 首次运行要解析一大片依赖图。`STARTUP_TIMEOUT_S`（180 秒）限制了等待上限，失败时会回报引擎的输出尾部。
-- **Steam 浏览器内的手柄输入**由 Steam 自己管理；本插件不额外提供手柄绑定或虚拟键盘。
-- **端口复用无法找回令牌。** 若端口已被另一个 dsh 实例占用，插件只能把浏览器指过去；一个从未鉴权过的浏览器，拿不到该实例的启动 URL 就无法生成 Cookie。
-
-## 测试（无需硬件即可运行）
-
-后端是纯 Python，只依赖一个被 stub 的 `decky` 模块，因此逻辑可脱离设备测试：
-
-```bash
-PYTHONPATH=tests python3 tests/run_tests.py
-```
-
-覆盖范围：URL 捕获、可重复的重复启动、URL 行过滤（「opening the default browser」那行会被正确**排除**，不当作 URL）、配置往返读写、始终带上 `--no-open`、`extra_args` 的 argv 引用处理、报告 URL 前进程死亡的干净报错、`stop()` 永不杀死外部实例，以及打包后 zip 的 Decky 目录规则。
-
-有三个真实缺陷是靠这套测试（而非肉眼检查）发现并修掉的：
-
-1. **死锁** —— `start()` 调用 `stop()`，重入了一个不可重入的 `asyncio.Lock`。
-2. **误导性的退出码** —— stdout 泵报出 `exit=None`，因为进程被回收之前 EOF 就已到达；现在它会等待真实退出状态。
-3. **1.4 MB 的 sourcemap** —— `@decky/rollup` 在与默认值发生选项冲突时由默认值胜出，所以 `output.sourcemap` 必须改在返回的 config 对象上，而不是作为参数传入。
-
-## 文件说明
+## 文件结构
 
 | 路径 | 作用 |
 |---|---|
 | `plugin.json` | Decky 清单（不含 `root` 标志） |
-| `main.py` | Decky 后端：路径发现、启动、URL 捕获、环境探测、设置读写 |
-| `src/index.tsx` | 快速访问菜单（QAM）面板界面 |
-| `tests/run_tests.py` | 68 项离线检查（无需掌机） |
-| `package.sh` | 按 Decky 要求的布局生成 `dsh-decky.zip` |
-| `tsconfig.json`、`rollup.config.js`、`package.json` | 构建工具链 |
+| `main.py` | 后端：路径发现、启动、URL 捕获、环境探测、设置读写、外部窗口 |
+| `src/index.tsx` | QAM 面板界面 |
+| `dist/index.js` | 构建产物（已提交） |
+| `tests/run_tests.py` | 80 项离线检查 |
+| `package.sh` | 按 Decky 布局打包 |
+| `docs/ab-demo.gif` | 两种打开方式的演示动画 |
 
 ## 许可
 

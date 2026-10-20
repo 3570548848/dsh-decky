@@ -1,225 +1,223 @@
-# DSH Launcher — a Decky Loader plugin for SteamOS-class handhelds
+# DSH Launcher
+
+**Run the DSH web agent inside Steam Gaming Mode — without switching to Desktop Mode.**
+
+[![Decky](https://img.shields.io/badge/Decky-Loader-1a9fff)](https://github.com/SteamDeckHomebrew/decky-loader)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 English | [简体中文](README.md)
 
-Run the **DeepSeek Harness (`dsh`)** web agent inside **Steam Gaming Mode** and open its GUI in
-Steam's own built-in browser — no trip to Desktop Mode, no `xdg-open`.
-
-Companion question answered: *"can you make a dsh plugin for SteamOS?"* — The `dsh` engine itself
-needs **no port**; it is plain JavaScript with no `os`/`cpu` restrictions and its Linux x64/arm64
-prebuilds all publish to npm. What SteamOS actually needs is a **launcher/adaptation layer**, which
-is what this plugin is. (A *DSH* plugin and a *Decky* plugin are two different plugin ecosystems:
-this repo is a **Decky** plugin.)
+![Two ways to open the GUI](docs/ab-demo.gif)
 
 ---
 
-## Verified facts
+## What this is
 
-Everything below was read out of the real packages, not recalled. Sources: `@deepseek-ai/dsh`
-0.2.1-rc.2, `@decky/ui` 4.15.1, `@decky/api` 1.1.3, the official `decky-plugin-template`, and
-[jessebofill/DeckWebBrowser](https://github.com/jessebofill/DeckWebBrowser).
+[DeepSeek Harness (`dsh`)](https://github.com/deepseek-ai/DeepSeek-Harness) is a capable agent
+runtime, but you drive it through a browser UI. In **Gaming Mode** on a SteamOS handheld there is
+no desktop session — no browser to open, and dsh's default `xdg-open` hand-off has nothing to talk
+to.
+
+This plugin closes exactly that gap: **start dsh in Gaming Mode and get its UI in front of you.**
+
+- Start/stop the engine from the Quick Access Menu (QAM)
+- Environment probe: shows where Node/dsh are and whether the sandbox works
+- Two ways to open the GUI, switchable in settings
+- Stops are explicit — a plugin reload will not kill your session
+
+> **Is this a DSH plugin?** No. It is a **Decky Loader** plugin — two different plugin ecosystems.
+> Also note the **`dsh` engine itself needs no port**: it is plain JavaScript with no `os`/`cpu`
+> restrictions, and its Linux x64/arm64 prebuilds are already on npm. A SteamOS system is missing
+> only a **launcher/adaptation layer**, which is what this is.
+
+## Two ways to open the GUI
+
+Both are **top-level navigations**, so both satisfy dsh's `SameSite=Strict` cookie requirement.
+
+| | Mode A · Steam's browser (default) | Mode B · External browser window |
+|---|---|---|
+| How | `Navigation.NavigateToExternalWeb(url)` into Steam's own browser | Plugin launches a real browser: Chromium `--app=<url>`, Firefox `--kiosk <url>` |
+| Shape | Opens in Steam's browser | Chrome-less window **overlaid on Gaming Mode** |
+| Depends on | Steam private APIs (`CreateBrowserView`, …) | **No Steam private API at all** |
+| Update-proof | Weaker (a Steam upgrade can break it) | **Stronger** (standard browser) |
+| Requires | Steam's browser available | A browser on the device (incl. flatpak) |
+
+Mode B discovers a browser automatically: native paths (`/usr/bin`, Homebrew, nix, snap) → flatpak.
+The panel has a **"Detect browser"** button so you can see which one it will use.
+
+> **Why not an `<iframe>`?**
+> dsh's session cookie is `HttpOnly; SameSite=Strict` and bound to the exact authority. An iframe is
+> same-site cross-origin, so it arrives **without the cookie** and the UI never loads.
+
+## Install
+
+### 1. Get Node.js and dsh onto the device
+
+> The root filesystem is usually read-only (an overlay may make `/` look writable while `/usr` stays
+> unwritable and reverts on reboot). **Install under `$HOME`.**
+
+```sh
+# Install nvm — do NOT hardcode a version; ask for the latest tag
+NVM_VER=$(curl -s https://api.github.com/repos/nvm-sh/nvm/releases/latest \
+  | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VER/install.sh" | bash
+
+# Close and reopen the terminal (so nvm's environment loads), then:
+nvm install --lts && nvm use --lts
+node -v
+
+npm i -g @deepseek-ai/dsh
+dsh --version
+```
+
+If `raw.githubusercontent.com` is unreachable, install via git:
+```sh
+git clone --depth 1 https://github.com/nvm-sh/nvm.git ~/.nvm && cd ~/.nvm && ./install.sh
+```
+
+> ⚠️ **Record `which node`** (e.g. `/home/deck/.nvm/versions/node/v24.x.x/bin/node`).
+> A Decky plugin is a service process that **inherits only a minimal PATH and cannot see an nvm
+> from your login shell**. If the probe reports no Node, put that path into the plugin's Advanced
+> settings.
+
+### 2. Install the plugin
+
+```sh
+curl -L -o dsh-decky.zip \
+  https://github.com/3570548848/dsh-decky/releases/download/v0.1.2/dsh-decky.zip
+```
+
+- **Decky UI**: Settings → Developer → Install plugin from zip → reload the loader
+- **Manually**: `unzip dsh-decky.zip -d ~/homebrew/plugins/`
+
+> Use **v0.1.2 explicitly**, not `/releases/latest`: `latest` currently resolves to v0.1.1 (no Mode
+> B) because v0.1.2 is marked prerelease and therefore skipped.
+
+The archive must contain **exactly one top-level directory** (`dsh-decky/plugin.json`) — a hard
+requirement of Decky's installer, which does `extractall` straight into `~/homebrew/plugins/`.
+`package.sh` guarantees it and the test suite checks it.
+
+### 3. First run
+
+1. QAM → **DSH Launcher**
+2. Press **Environment probe** and read three things:
+   - **Node.js / dsh** — resolved paths; if "not found", set them in Advanced settings
+   - **bwrap / Landlock** — if both are unusable, set the permission preset to `danger-full-access`
+     (and understand what that means), or install `bubblewrap`
+   - **Is `/` read-only** — tells you where to install
+3. Press **Start and open DSH**. A first cold boot takes ~1–3 minutes; engine output is visible
+   under Advanced → View engine output.
+
+## Security
+
+- **No `root` flag.** The plugin runs the engine as the normal user. Decky can run a backend as
+  root, but that leaves root-owned files in your home directory — third-party plugins should use
+  the least privilege that works.
+- **No credentials read or stored.** The plugin never opens `~/.dsh` secrets; the launch token is
+  simply parsed from the engine's stdout and handed to the browser.
+- **`danger-full-access` is a documented escape hatch**, not a default. It removes file confinement
+  for every command the agent runs; enable it only when no sandbox runner is usable.
+
+## Known limits
+
+- **The UI is not rendered inside the Decky panel** (neither mode embeds it) — `SameSite=Strict`
+  rules out iframes. This follows from dsh's auth model.
+- **Mode B is not yet verified on hardware**: `--app`/`--kiosk` launching, GUI environment
+  injection, and whether the window actually appears in Gaming Mode have not been run on a device.
+- **Cold boot is slow**: the first run resolves a large dependency graph; the timeout is 180 s.
+- **Port reuse cannot recover the token**: if the port is already served by *another* dsh instance,
+  the plugin cannot obtain its launch token (it is random and in-memory only), so a browser cannot
+  authenticate. **Change the port** (e.g. to 3081) to get around it.
+- **Gamepad input** inside Steam's browser is managed by Steam; this plugin adds no bindings or
+  virtual keyboard.
+- Engine-side end-to-end (executing commands under Gaming Mode, long sessions, resume from suspend)
+  is **still not fully verified**.
+
+## Design notes and evidence
+
+Everything below was read from real package sources, not recalled. Sources:
+`@deepseek-ai/dsh` 0.2.1-rc.2, `@decky/ui` 4.15.1, `@decky/api` 1.1.3, the official
+`decky-plugin-template`, and [jessebofill/DeckWebBrowser](https://github.com/jessebofill/DeckWebBrowser).
+
+<details>
+<summary><b>Verified facts and evidence (click to expand)</b></summary>
 
 | Fact | Consequence | Evidence |
 |---|---|---|
-| `@deepseek-ai/dsh` declares no `os`/`cpu`; deps include `@deepseek-ai/node-addon-system-linux-x64` | **No DSH kernel port needed.** Linux x64 is a supported target | npm metadata for `0.2.1-rc.2` |
-| `dsh web` prints `dsh web: <authenticated-url>` to stdout | That one line is the only place the launch token appears; parse it | `dsh-web-app/lib/index.js:162` |
-| `dsh` authenticates via `?token=`, then sets `HttpOnly; SameSite=Strict` cookie **bound to the authority** | The GUI **must** be a top-level navigation in a real browsing context. An `<iframe>` would be same-site-cross-origin and arrive **unauthenticated** | `dsh-client-connection/lib/index.js:348` (`sessionCookie`) |
-| `dsh web` hand-off uses the `open` package → `xdg-open`; with `--no-open` it is skipped | Gaming Mode has no desktop session, so **always start with `--no-open`** and open the URL yourself | `dsh-web-app/lib/index.js:156-169` |
-| Linux sandbox chain is `bwrap` → `landlock`; if **both** probes fail the run **fails closed** (`SANDBOX_UNAVAILABLE`), it does not silently run unconfined | A healthy-looking Deck can still refuse every command. Probe both, and explain the fix | `dsh-sandbox-local`: `PLATFORM_CHAINS.linux = ["bwrap","landlock"]` |
-| `danger-full-access` **bypasses `ctx.sandbox` entirely** (`super.execute`, `denied: false`) | The escape hatch when no sandbox runner exists on the machine | `dsh-bash-sandbox/lib/index.js:68`; its README line 173 |
-| node-pty on Linux uses `forkpty()`; `spawn-helper` is `#if defined(__APPLE__)` only | PTY needs **no** extra shim on Linux; `prebuilds/linux-x64/pty.node` ships | `node-pty/src/unix/pty.cc:393` |
-| `koffi` (FFI) is reached through `createLazyRequire` on the Win32 path only | Non-Windows never loads it; no FFI build needed | `dsh-win32-process/lib/index.js:25` |
-| Decky `plugin.json` `flags` may include `root`, which runs the **backend as root** | **This plugin deliberately does not use it** — see Security below | `decky.pyi` lines 29/37 |
+| `@deepseek-ai/dsh` declares no `os`/`cpu`; deps include `node-addon-system-linux-x64` | No kernel port needed | `0.2.1-rc.2` npm metadata |
+| `dsh web` prints `dsh web: <url>` to stdout | The launch token appears only there | `dsh-web-app/lib/index.js:162` |
+| Auth via `?token=`, then an `HttpOnly; SameSite=Strict` cookie **bound to the authority** | The UI **must** be a top-level navigation; an iframe gets no cookie | `dsh-client-connection/lib/index.js:348` |
+| Browser hand-off uses `open` → `xdg-open`; `--no-open` skips it | Gaming Mode has no desktop session, so **always `--no-open`** | `dsh-web-app/lib/index.js:156-169` |
+| Linux sandbox chain `bwrap` → `landlock`; if both fail it **fails closed** | A healthy-looking handheld may refuse every command | `dsh-sandbox-local`: `PLATFORM_CHAINS.linux` |
+| `danger-full-access` bypasses `ctx.sandbox` entirely | Escape hatch when no runner exists | `dsh-bash-sandbox/lib/index.js:68` |
+| On Linux node-pty uses `forkpty()` (`spawn-helper` is macOS-only) | No extra shim needed on Linux | `node-pty/src/unix/pty.cc:393` |
+| `koffi` loads lazily on the Win32 path only | No FFI build off-Windows | `dsh-win32-process/lib/index.js:25` |
+| Decky `flags` may include `root` → backend runs as root | **Deliberately unused here** | `decky.pyi` 29/37 |
 
-## Design, and why
+</details>
+
+<details>
+<summary><b>Launch and open internals (click to expand)</b></summary>
 
 **Launch.** The backend spawns `dsh --profile web --no-open --port <N>` in its **own process group**,
-drains stdout, and resolves the printed token URL. It then waits for the port to actually accept a
-connection before handing the URL onward — the printed line precedes the bind, so opening on the
-line alone would race.
+drains stdout and resolves the tokenised URL. It then **waits for the port to actually accept a
+connection** before handing the URL on — the printed line precedes the bind, so acting on it alone
+would race.
 
-**Open (two modes, switchable in settings).** Both satisfy `SameSite=Strict`, because both are
-**top-level navigations**:
-
-- **Mode A · Steam's built-in browser** (default): the frontend calls
-  `Navigation.NavigateToExternalWeb(url)` (`@decky/ui`), routing the URL into Steam's own browser.
-- **Mode B · external browser in a standalone window**: the plugin starts a real browser with a
-  chrome-less window.
-  - Chromium family (chromium / chrome / edge / brave / vivaldi) uses `--app=<url>`
-  - Firefox family has **no `--app`** and uses `--kiosk <url>`
-  - Discovery order: native paths (`/usr/bin`, Homebrew, nix, snap) → **flatpak** (probe with
-    `flatpak info`, then `flatpak run`)
-  - **GUI environment must be injected explicitly** (`DISPLAY`, `WAYLAND_DISPLAY`,
-    `XDG_RUNTIME_DIR`): a plugin is a service process and usually does not inherit them, so without
-    this the browser fails to start or stays invisible
-  - This path **avoids Steam's private APIs entirely** (`CreateBrowserView` / `findModuleChild`), so
-    it is more resilient to Steam updates; the trade-off is a window **overlaid on Gaming Mode**
-    rather than embedded in the panel
-
-> Why not an `<iframe>`: dsh's session cookie is `SameSite=Strict`, and an iframe is same-site
-> cross-origin, so it would arrive **without the cookie** and the UI would never load.
+**Open.** See the two modes above. Mode B discovery order is native paths → flatpak (probe with
+`flatpak info`, run with `flatpak run`), and it **injects the GUI environment explicitly**
+(`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`) — a plugin is a service process and usually does
+not inherit them, so without this the browser fails to start or stays invisible.
 
 **Survive.** `_unload` deliberately does **not** stop the engine. A plugin reload, or Steam resuming
 from suspend, must not kill an in-flight agent session. Stopping is an explicit user action.
 
-**Never overreach.** If the port is already serving (a systemd unit, a manual run), the plugin
-reports it as an **external** instance, marks `managed: false`, and **`stop()` will not kill it** —
-verified by test.
+**Never overreach.** When the port is already served by another instance, the plugin reports it as
+an **external** instance, marks `managed: false`, and **`stop()` will not kill it** — covered by a
+test.
 
-## Security
+</details>
 
-- **No `root` flag.** The plugin runs the engine as the normal user and touches nothing privileged.
-  Running the agent as root would mean root-owned files quietly appearing in your home directory,
-  and Decky plugins are third-party code — the least privilege that works is the right choice.
-- **No credentials read or stored.** The plugin never opens `~/.dsh` secrets; the launch token is
-  parsed from the engine's own stdout and passed straight to Steam's browser.
-- `danger-full-access` is offered as a **documented escape hatch**, not a default. It disables file
-  confinement for every command the agent runs. Enable it only if the environment probe says both
-  sandbox runners are unusable and you accept unconfined execution.
+## Development
 
-## Install
-
-### 1. Get Node.js and dsh onto the device (once)
-
-The root filesystem is read-only (an overlay may make `/` look writable while `/usr` stays
-unwritable and reverts on reboot), so `apt`/`dnf`/`pacman` are not reliable. **Install into `$HOME`**:
-
-```bash
-# Option A: nvm -- do NOT hardcode a version; ask for the latest tag first
-NVM_VER=$(curl -s https://api.github.com/repos/nvm-sh/nvm/releases/latest \
-  | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-echo "installing nvm $NVM_VER"
-curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VER/install.sh" | bash
-
-# Close and reopen the terminal (so nvm's environment is loaded), then:
-nvm install --lts        # dsh wants Node >= 20; LTS is the stable line
-nvm use --lts
-node -v
-
-npm i -g @deepseek-ai/dsh
-dsh --version             # confirm it runs
-```
-
-> If `raw.githubusercontent.com` is unreachable (some networks block it), install via git:
-> ```bash
-> git clone --depth 1 https://github.com/nvm-sh/nvm.git ~/.nvm && cd ~/.nvm && ./install.sh
-> ```
-
-> **Record the output of `which node`** (e.g. `/home/deck/.nvm/versions/node/v24.x.x/bin/node`).
-> A Decky plugin process inherits only a minimal PATH and **cannot see an nvm from your login
-> shell**; if the probe reports no Node, put that path into the plugin's Advanced settings.
-
-> Option B: fnm, or unpack an official prebuilt tarball into `~/.local`. A distro package is fine
-> too if your system really persists writes to `/usr` — the plugin discovers paths on its own and
-> lets you override them explicitly.
-
-> If your system reports `/usr` as writable, a distro package is fine too — the plugin discovers
-> whatever it can and lets you override the paths explicitly.
-
-### 2. Package the plugin
-
-A ready-to-install archive is produced by the packaging script:
-
-```bash
-bash package.sh          # writes ../dsh-decky.zip
-```
-
-`dist/index.js` must exist first. It is committed in this repo, but to rebuild it from
-`src/index.tsx` you need a host where `@decky/rollup` can run:
-
-```bash
+```sh
 pnpm install
-pnpm run build
+pnpm run build      # build src/index.tsx → dist/index.js
+bash package.sh     # package in the Decky-required layout → ../dsh-decky.zip
+PYTHONPATH=tests python3 tests/run_tests.py    # 80 offline checks, no handheld needed
 ```
 
-> `@rollup/rollup-linux-x64-musl` is pinned as a dev dependency because Decky's build normally runs
-> on Linux x64; on other hosts that optional dep is skipped. It has nevertheless been built and
-> verified on `linux/android arm64` (`@rollup/rollup-android-arm64`).
+The backend is pure Python and only needs a stubbed `decky` module, so its **logic is testable off
+device**.
 
-### 3. Deploy into Decky
+Covered: URL capture, repeated starts, URL-line filtering ("opening the default browser" is
+correctly **excluded**), config round-trip, `--no-open` always present, `extra_args` argv handling,
+clean failure when the process dies before reporting a URL, `stop()` never killing a foreign
+instance, the zip's Decky layout rules, and Mode B's launch arguments and GUI environment injection.
 
-Decky's own installer does `ZipFile(...).extractall(~/homebrew/plugins)`, so the zip must contain
-**exactly one top-level directory** with `plugin.json` at depth 1 — `package.sh` guarantees this
-and the README's test suite checks it.
+**Real defects found by these tests** (not by eyeballing):
 
-```bash
-# via Decky's UI: Settings → Developer → Install plugin from zip, pick dsh-decky.zip
-# then reload the loader.
-
-# or manually:
-unzip dsh-decky.zip -d ~/homebrew/plugins/
-# → ~/homebrew/plugins/dsh-decky/{plugin.json,package.json,main.py,dist/index.js,py_modules/}
-```
-
-### 4. First run
-
-1. Open the Quick Access Menu → **DSH Launcher**.
-2. Press **环境自检 (environment probe)** and read the table:
-   - **Node.js / dsh** — resolved paths. If either is "not found", set them in Advanced.
-   - **/ read-only** — expected `true` on SteamOS; tells you where to install.
-   - **bwrap / Landlock** — if both are unusable, set the permission preset to
-     `danger-full-access` (and understand what that means), or install `bubblewrap`.
-3. Press **启动并打开 DSH (start and open)**. First cold boot can take 1–3 minutes; the engine's
-   output is visible under Advanced → *View engine output*.
-
-## Known limits (read before relying on this)
-
-- **Not rendered inside the Decky panel.** The GUI opens in Steam's browser, not as an embedded
-  panel, because the `SameSite=Strict` cookie rules out framing. This is a deliberate consequence
-  of dsh's auth model, not an oversight.
-- **Verified on real hardware.** On 2026-10-19 it was exercised on a SkorionOS / first-gen ROG Ally
-  (x86_64): the plugin loads, the QAM panel works, the environment probe runs, and it **started the
-  engine and opened the DSH GUI inside Steam's built-in browser**. Findings:
-  - **`bwrap` is usable** → the first sandbox rung passes, so `danger-full-access` is **not** needed
-    (`Landlock` reporting unusable is harmless: the Linux chain is `bwrap` → `landlock`, and
-    passing the first rung is enough).
-  - **`/` reported writable** → the usual "SteamOS root is read-only" assumption did not hold; yet
-    `/usr` may still be unwritable or revert on reboot, so installing Node under `$HOME` remains the
-    recommendation.
-  - **Node discovery was a real pitfall** → the plugin process only inherits a minimal PATH and
-    cannot see an nvm configured in the login shell. Since 0.1.1 the probe shows the actual PATH
-    and the paths it tried, and covers Homebrew/nix/snap/distrobox layouts.
-- **Still unverified.** Engine-side end-to-end behaviour (executing commands under Gaming Mode, long
-  sessions, resume from suspend) is not sufficiently covered yet. Cold boot is slow — allow 1–3 min.
-- **Cold boot is slow.** `dsh` resolves a large dependency graph on first run. `STARTUP_TIMEOUT_S`
-  (180 s) bounds the wait and reports the engine's tail output on failure.
-- **Gamepad input in Steam's browser** is Steam's own to manage; this plugin does not add gamepad
-  bindings or a virtual keyboard of its own.
-- **Port reuse cannot recover the token.** If another dsh instance owns the port, the plugin can
-  only point the browser at it; a browser that has never authenticated cannot mint the cookie
-  without that instance's launch URL.
-
-## Tests (run without hardware)
-
-The backend is pure Python with a stubbed `decky` module, so its logic is testable off-device:
-
-```bash
-PYTHONPATH=tests python3 tests/run_tests.py
-```
-
-Covered: URL capture, idempotent restart, URL-line filtering (the "opening the default browser"
-line is correctly **not** treated as a URL), config round-trip, `--no-open` always present, argv
-quoting of `extra_args`, death-before-URL raising cleanly, `stop()` never killing a foreign
-instance, and the packaged zip's Decky layout rules.
-
-Three real defects were found and fixed this way, rather than by inspection:
-
-1. **Deadlock** — `start()` re-entered a non-reentrant `asyncio.Lock` by calling `stop()`.
-2. **Misleading exit code** — the stdout pump reported `exit=None` because EOF arrives before the
-   process is reaped; it now awaits the real status.
-3. **1.4 MB sourcemap** — `@decky/rollup` wins option conflicts with its defaults, so
-   `output.sourcemap` must be mutated on the returned config, not passed in.
+1. **Deadlock** — `start()` called `stop()`, re-entering a non-reentrant `asyncio.Lock`
+2. **Misleading exit code** — the stdout pump reported `exit=None`, because EOF arrives before the
+   process is reaped
+3. **1.4 MB sourcemap** — `@decky/rollup` resolves option conflicts in favour of its defaults, so
+   the returned config must be mutated rather than passed options
+4. **Attribute shadowing a method** — `self._browser_argv` hid the method of the same name, raising
+   `NoneType not callable`
+5. **Dead config** — `open_with` was declared but never read by the backend, advertising an option
+   that did not exist
 
 ## Files
 
 | Path | Role |
 |---|---|
 | `plugin.json` | Decky manifest (no `root` flag) |
-| `main.py` | Decky backend: discovery, launch, URL capture, probe, settings |
+| `main.py` | Backend: discovery, launch, URL capture, probe, settings, external window |
 | `src/index.tsx` | QAM panel UI |
-| `tests/run_tests.py` | 68 offline checks (run without a Deck) |
-| `package.sh` | Builds `dsh-decky.zip` in the Decky-required layout |
-| `tsconfig.json`, `rollup.config.js`, `package.json` | Build toolchain |
+| `dist/index.js` | Built bundle (committed) |
+| `tests/run_tests.py` | 80 offline checks |
+| `package.sh` | Packages in the Decky-required layout |
+| `docs/ab-demo.gif` | Demo of the two ways to open the GUI |
 
 ## License
 
