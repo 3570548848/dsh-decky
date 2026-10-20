@@ -946,11 +946,11 @@ class Plugin:
                     tail = fh.read()[-4000:].decode("utf-8", "replace")
             except OSError:
                 pass
-        try:
-            os.unlink(err_path)
-        except OSError:
-            pass
         if rc is not None and not (rc == 0 and browser.get("detached_ok")):
+            try:
+                os.unlink(err_path)
+            except OSError:
+                pass
             self.log_lines.append(f"[外部窗口] {browser.get('label')} 启动即退（退出码 {rc}）")
             for line in (tail.strip() or "（无 stderr 输出）").splitlines()[:40]:
                 self.log_lines.append(f"[外部窗口] {line}")
@@ -960,6 +960,50 @@ class Plugin:
                 "reason": "exited",
                 "failNote": f"退出码 {rc}" + (f"：{tail.strip()[:120]}" if tail.strip() else ""),
             }
+
+        if rc == 0 and browser.get("detached_ok"):
+            # The CLI handed off; the real app inherited our stderr file.
+            # Re-read it a few seconds later and check the app is alive —
+            # "reported opened but no window" needs evidence, not guesses.
+            app_id = next((a for a in argv if "." in a and "/" not in a), "firefox")
+
+            async def _delayed_check() -> None:
+                await asyncio.sleep(6)
+                alive = False
+                try:
+                    probe = await asyncio.create_subprocess_exec(
+                        "pgrep", "-f", app_id,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    out, _ = await probe.communicate()
+                    alive = probe.returncode == 0 and bool(out.strip())
+                except Exception:  # noqa: BLE001
+                    pass
+                extra = ""
+                try:
+                    with open(err_path, "rb") as fh:
+                        extra = fh.read()[-4000:].decode("utf-8", "replace")
+                except OSError:
+                    pass
+                self.log_lines.append(
+                    f"[外部窗口] 分离启动回读（6s）：进程 {'存活' if alive else '已死'}；"
+                    f"显示 DISPLAY={self._gui_env().get('DISPLAY')}"
+                )
+                for line in (extra.strip() or "（stderr 无新输出）").splitlines()[-30:]:
+                    self.log_lines.append(f"[外部窗口·延迟] {line}")
+                try:
+                    os.unlink(err_path)
+                except OSError:
+                    pass
+
+            self._delayed_task = asyncio.create_task(_delayed_check())
+            err_file_keep = True  # noqa: F841 - the task reads then unlinks it
+        else:
+            try:
+                os.unlink(err_path)
+            except OSError:
+                pass
 
         # Survived: keep the handle so a later close can reach it, but do not
         # block on it — the browser runs for as long as the user keeps the
