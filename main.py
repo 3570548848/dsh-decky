@@ -567,6 +567,17 @@ class Plugin:
                 match = URL_LINE.search(text)
                 if match and not url_future.done():
                     self.url = match.group(1)
+                    # Plan C's launcher script reads the URL from this file at
+                    # game start (Steam snapshots Exec at registration, so the
+                    # rotating token URL must live outside it).
+                    try:
+                        with open(
+                            os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "last-url.txt"),
+                            "w", encoding="utf-8",
+                        ) as fh:
+                            fh.write(self.url)
+                    except OSError:
+                        pass
                     url_future.set_result(self.url)
         except asyncio.CancelledError:
             raise
@@ -1051,8 +1062,80 @@ class Plugin:
             "argv": browser.get("argv"),
         }
 
+    # ------------------------------------------------------------------
+    # Plan C support: the launcher script Steam will run as a Non-Steam game.
+    #
+    # The shortcut itself is registered from the FRONTEND via
+    # SteamClient.Apps.AddShortcut — Steam owns the shortcut store, and
+    # writing that binary format by hand risks corrupting the user's whole
+    # non-Steam library.
+    # The backend only prepares the script and the rotating token URL.
+    # ------------------------------------------------------------------
+
+    SHORTCUT_NAME = "DSH Browser"
+    LAUNCHER_SCRIPT = "dsh-decky-launch.sh"
+
+    def _launcher_script_path(self) -> str:
+        return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, self.LAUNCHER_SCRIPT)
+
+    def _write_launcher_script(self, browser: Dict[str, Any]) -> str:
+        """Write the wrapper Steam launches as a Non-Steam game.
+
+        The URL is read from a settings-dir file at launch time: Steam
+        snapshots the Exec target at registration, so the rotating token URL
+        must live outside the script.
+        """
+        script = self._launcher_script_path()
+        url_file = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "last-url.txt")
+        argv = browser["argv"]
+        if browser.get("family") == "firefox":
+            tail_args = '--no-remote --kiosk "$URL"'
+        else:
+            tail_args = '--app="$URL" --start-maximized'
+        lines = [
+            "#!/usr/bin/env bash",
+            "# Written by DSH Launcher (plan C). Steam runs this inside the",
+            "# gamescope session, so the window composites in Gaming Mode.",
+            'URL="$(cat "%s" 2>/dev/null || true)"' % url_file,
+            '[ -z "$URL" ] && URL="http://127.0.0.1:3080/"',
+        ]
+        if str(browser.get("label", "")).startswith("flatpak:"):
+            app_id = next((a for a in argv if "." in a and "/" not in a), "org.mozilla.firefox")
+            lines.append(f"exec flatpak run {app_id} {tail_args}")
+        else:
+            lines.append(f'exec "{argv[0]}" {tail_args}')
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.chmod(script, 0o755)
+        return script
+
+    async def prepare_nonsteam(self) -> Dict[str, Any]:
+        """Prepare the launcher script + URL; the frontend adds the shortcut."""
+        browser = self._find_browser()
+        if browser is None:
+            return {"ok": False, "reason": "no-browser", "advice": "先让「探测可用浏览器」能找到浏览器。"}
+        url_file = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "last-url.txt")
+        fallback = f"http://{DEFAULT_HOST}:{self._config.get('port') or DEFAULT_PORT}/"
+        try:
+            with open(url_file, "w", encoding="utf-8") as fh:
+                fh.write(self.url or fallback)
+        except OSError as exc:
+            return {"ok": False, "reason": "url-file", "advice": str(exc)[:160]}
+        script = self._write_launcher_script(browser)
+        return {
+            "ok": True,
+            "name": self.SHORTCUT_NAME,
+            "exe": script,
+            "startDir": os.path.dirname(script),
+            "browser": browser.get("label"),
+            "hasToken": bool(self.url),
+            "advice": (
+                "已准备好启动脚本。请在游戏库中手动「添加非 Steam 游戏」并选择该脚本，"
+                "或点下方按钮让插件通过 Steam API 自动添加。"
+            ),
+        }
+
     async def close_external(self) -> Dict[str, Any]:
-        """Terminate the browser window this plugin opened, if any."""
         proc = getattr(self, "_browser_proc", None)
         if proc is not None and proc.returncode is None:
             try:

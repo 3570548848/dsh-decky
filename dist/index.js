@@ -95,6 +95,7 @@ const openExternal = callable("open_external");
 const closeExternal = callable("close_external");
 const browserProbe = callable("browser_probe");
 const probeEnv = callable("probe");
+const prepareNonSteam = callable("prepare_nonsteam");
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -168,6 +169,11 @@ function Row({ label, value, warn, description }) {
 // ---------------------------------------------------------------------------
 // Content
 // ---------------------------------------------------------------------------
+/** What to tell the user after registering (or when registering failed). */
+function fallbackHint(prep) {
+    return ("已加入游戏库。回到游戏模式首页，列表里会有「DSH Browser」，启动即全屏打开 DSH。" +
+        (prep.exe ? ` 若没出现，可手动添加：游戏库 → 添加非 Steam 游戏 → 选择 ${prep.exe}` : ""));
+}
 function Content() {
     const [cfg, setCfg] = SP_REACT.useState(null);
     const [status, setStatus] = SP_REACT.useState(null);
@@ -298,7 +304,54 @@ function Content() {
                                         catch (e) {
                                             toaster.toast({ title: "关闭失败", body: String(e) });
                                         }
-                                    }, children: "\u5173\u95ED\u5916\u90E8\u7A97\u53E3" }) })] })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null || !st?.managed, onClick: doStop, children: busy === "stop" ? "停止中…" : "停止引擎" }) }), st?.error && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u4E0A\u6B21\u9519\u8BEF", value: st.error, warn: true }) }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8DEF\u5F84", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node.js", value: cfg?.resolved?.node ?? "未找到 —— SteamOS 根目录只读，请装到 $HOME", warn: !cfg?.resolved?.node }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "dsh", value: cfg?.resolved?.dsh ?? "未找到", warn: !cfg?.resolved?.dsh }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6765\u6E90", value: cfg?.resolved?.source ?? "-" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null, onClick: doProbe, children: busy === "probe" ? "检测中…" : "环境自检（Node / bwrap / Landlock / 只读根）" }) }), probe && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node \u7248\u672C", value: probe.node?.version ?? "未知", warn: !probe.node?.version }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6839\u6587\u4EF6\u7CFB\u7EDF", value: probe.root_readonly === null ? "未知" : probe.root_readonly ? "/ 只读（SteamOS 典型）" : "/ 可写" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "bwrap", value: probe.bwrap?.path ? (probe.bwrap.usable ? "可用" : `不可用：${probe.bwrap.reason ?? "probe 失败"}`) : "未安装", warn: !probe.bwrap?.usable }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Landlock", value: String(probe.landlock?.usable ?? "不可用"), warn: !(probe.landlock?.usable === "full" || probe.landlock?.usable === "partial") }) }), verdict && !verdict.usable && verdict.advice && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6C99\u7BB1\u4E0D\u53EF\u7528", value: verdict.advice, warn: true }) })), !probe.node?.path && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node \u672A\u627E\u5230", value: "插件进程只继承精简的 PATH，不会加载你登录 shell 的环境。\n" +
+                                    }, children: "\u5173\u95ED\u5916\u90E8\u7A97\u53E3" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null, onClick: async () => {
+                                        setBusy("ns");
+                                        try {
+                                            const prep = await prepareNonSteam();
+                                            if (!prep.ok) {
+                                                toaster.toast({
+                                                    title: "准备失败",
+                                                    body: (prep.advice ?? prep.reason ?? "").slice(0, 260),
+                                                });
+                                                return;
+                                            }
+                                            // Register through Steam's own API — Steam owns
+                                            // shortcuts.vdf; hand-writing that binary format can
+                                            // corrupt the user's entire non-Steam library.
+                                            const SteamClient = window.SteamClient;
+                                            if (!SteamClient?.Apps?.AddShortcut) {
+                                                toaster.toast({
+                                                    title: "当前 Steam 版本没有 AddShortcut",
+                                                    body: `请手动添加：游戏库 → 添加非 Steam 游戏 → 选择 ${prep.exe}`,
+                                                });
+                                                return;
+                                            }
+                                            // Remove a stale shortcut of the same name first so
+                                            // repeated use doesn't pile up duplicates.
+                                            try {
+                                                const existing = SteamClient.Apps.GetShortcuts?.() ?? [];
+                                                for (const sc of existing) {
+                                                    if (sc?.strAppName === prep.name) {
+                                                        SteamClient.Apps.RemoveShortcut?.(sc.unAppID);
+                                                    }
+                                                }
+                                            }
+                                            catch {
+                                                /* best effort */
+                                            }
+                                            const id = SteamClient.Apps.AddShortcut(prep.name, prep.exe, prep.startDir ?? "", "");
+                                            toaster.toast({
+                                                title: id ? "已添加「DSH Browser」" : "添加结果未知",
+                                                body: fallbackHint(prep),
+                                            });
+                                        }
+                                        catch (e) {
+                                            toaster.toast({ title: "添加失败", body: String(e).slice(0, 260) });
+                                        }
+                                        finally {
+                                            setBusy(null);
+                                        }
+                                    }, children: busy === "ns" ? "添加中…" : "添加为游戏库条目（方案 C）" }) })] })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null || !st?.managed, onClick: doStop, children: busy === "stop" ? "停止中…" : "停止引擎" }) }), st?.error && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u4E0A\u6B21\u9519\u8BEF", value: st.error, warn: true }) }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8DEF\u5F84", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node.js", value: cfg?.resolved?.node ?? "未找到 —— SteamOS 根目录只读，请装到 $HOME", warn: !cfg?.resolved?.node }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "dsh", value: cfg?.resolved?.dsh ?? "未找到", warn: !cfg?.resolved?.dsh }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6765\u6E90", value: cfg?.resolved?.source ?? "-" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null, onClick: doProbe, children: busy === "probe" ? "检测中…" : "环境自检（Node / bwrap / Landlock / 只读根）" }) }), probe && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node \u7248\u672C", value: probe.node?.version ?? "未知", warn: !probe.node?.version }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6839\u6587\u4EF6\u7CFB\u7EDF", value: probe.root_readonly === null ? "未知" : probe.root_readonly ? "/ 只读（SteamOS 典型）" : "/ 可写" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "bwrap", value: probe.bwrap?.path ? (probe.bwrap.usable ? "可用" : `不可用：${probe.bwrap.reason ?? "probe 失败"}`) : "未安装", warn: !probe.bwrap?.usable }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Landlock", value: String(probe.landlock?.usable ?? "不可用"), warn: !(probe.landlock?.usable === "full" || probe.landlock?.usable === "partial") }) }), verdict && !verdict.usable && verdict.advice && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6C99\u7BB1\u4E0D\u53EF\u7528", value: verdict.advice, warn: true }) })), !probe.node?.path && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node \u672A\u627E\u5230", value: "插件进程只继承精简的 PATH，不会加载你登录 shell 的环境。\n" +
                                         "它看到的 PATH：" + (probe.path_env || "(空)") + "\n" +
                                         "试过的位置（均未命中）：\n" +
                                         ((probe.node?.tried ?? []).map((t) => "  " + t.path).join("\n") ||

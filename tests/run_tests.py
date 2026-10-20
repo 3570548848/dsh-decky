@@ -288,6 +288,17 @@ def test_external_window_mode() -> None:
     check("open_with drives the open path", "openGui(res.url, cfg?.config?.open_with" in ui)
     check("a browser probe button exists", "browserProbe()" in ui)
 
+    # Plan C must go through Steam's own API: shortcuts.vdf is Steam's file,
+    # and a hand-written binary can corrupt the whole non-Steam library.
+    check("plan C registers via SteamClient.Apps.AddShortcut",
+          "Apps.AddShortcut" in ui)
+    check("plan C never hand-writes shortcuts.vdf",
+          "_vdf_add_shortcut" not in src and "shortcuts.vdf" not in src)
+    check("plan C prepares a launcher script server-side",
+          "prepare_nonsteam" in src and "dsh-decky-launch.sh" in src)
+    check("launcher script reads the rotating token URL",
+          "last-url.txt" in src)
+
 
 
 def test_zip_layout() -> None:

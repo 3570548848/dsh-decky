@@ -98,6 +98,16 @@ const browserProbe = callable<[], {
   diag?: { home: string; uid: number; flatpak_roots: Array<{ path: string; exists: boolean; apps?: string[]; error?: string }> };
 }>("browser_probe");
 const probeEnv = callable<[], ProbeReply>("probe");
+const prepareNonSteam = callable<[], {
+  ok: boolean;
+  name?: string;
+  exe?: string;
+  startDir?: string;
+  browser?: string;
+  hasToken?: boolean;
+  reason?: string;
+  advice?: string;
+}>("prepare_nonsteam");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -189,6 +199,14 @@ function Row({ label, value, warn, description }: { label: string; value: string
 // ---------------------------------------------------------------------------
 // Content
 // ---------------------------------------------------------------------------
+
+/** What to tell the user after registering (or when registering failed). */
+function fallbackHint(prep: { exe?: string; startDir?: string }): string {
+  return (
+    "已加入游戏库。回到游戏模式首页，列表里会有「DSH Browser」，启动即全屏打开 DSH。" +
+    (prep.exe ? ` 若没出现，可手动添加：游戏库 → 添加非 Steam 游戏 → 选择 ${prep.exe}` : "")
+  );
+}
 
 function Content() {
   const [cfg, setCfg] = useState<ConfigReply | null>(null);
@@ -368,6 +386,64 @@ function Content() {
                 }}
               >
                 关闭外部窗口
+              </ButtonItem>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                disabled={busy !== null}
+                onClick={async () => {
+                  setBusy("ns");
+                  try {
+                    const prep = await prepareNonSteam();
+                    if (!prep.ok) {
+                      toaster.toast({
+                        title: "准备失败",
+                        body: (prep.advice ?? prep.reason ?? "").slice(0, 260),
+                      });
+                      return;
+                    }
+                    // Register through Steam's own API — Steam owns
+                    // shortcuts.vdf; hand-writing that binary format can
+                    // corrupt the user's entire non-Steam library.
+                    const SteamClient = (window as any).SteamClient;
+                    if (!SteamClient?.Apps?.AddShortcut) {
+                      toaster.toast({
+                        title: "当前 Steam 版本没有 AddShortcut",
+                        body: `请手动添加：游戏库 → 添加非 Steam 游戏 → 选择 ${prep.exe}`,
+                      });
+                      return;
+                    }
+                    // Remove a stale shortcut of the same name first so
+                    // repeated use doesn't pile up duplicates.
+                    try {
+                      const existing = SteamClient.Apps.GetShortcuts?.() ?? [];
+                      for (const sc of existing) {
+                        if (sc?.strAppName === prep.name) {
+                          SteamClient.Apps.RemoveShortcut?.(sc.unAppID);
+                        }
+                      }
+                    } catch {
+                      /* best effort */
+                    }
+                    const id = SteamClient.Apps.AddShortcut(
+                      prep.name,
+                      prep.exe,
+                      prep.startDir ?? "",
+                      ""
+                    );
+                    toaster.toast({
+                      title: id ? "已添加「DSH Browser」" : "添加结果未知",
+                      body: fallbackHint(prep),
+                    });
+                  } catch (e) {
+                    toaster.toast({ title: "添加失败", body: String(e).slice(0, 260) });
+                  } finally {
+                    setBusy(null);
+                  }
+                }}
+              >
+                {busy === "ns" ? "添加中…" : "添加为游戏库条目（方案 C）"}
               </ButtonItem>
             </PanelSectionRow>
           </>
