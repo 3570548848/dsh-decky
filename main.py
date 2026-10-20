@@ -678,21 +678,18 @@ class Plugin:
             found = self._expand(candidate)
             if found:
                 out.append({"argv": [found], "family": family, "label": found})
-        # 3) `flatpak run <app-id>` — the sandboxed, fully-supported path,
-        #    given a session bus by _gui_env (its absence was the exit-1 cause).
+        # 3) `flatpak run <app-id>` — the sandboxed path. Existence is decided
+        #    by the filesystem (an app tree on disk IS an installed app): the
+        #    `flatpak info` CLI probe dies on the poisoned TMPDIR too
+        #    (PyInstaller OpenSSL), so it must never be the oracle.
         flatpak = shutil.which("flatpak") or self._expand("/usr/bin/flatpak")
         if flatpak:
             for app_id, family in FLATPAK_BROWSERS:
-                try:
-                    probe = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                        [flatpak, "info", app_id],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=8,
-                    )
-                except Exception:  # noqa: BLE001 - probe failure just skips
-                    continue
-                if probe.returncode == 0:
+                installed = any(
+                    os.path.isdir(os.path.join(os.path.expanduser(root), "app", app_id))
+                    for root in FLATPAK_APP_ROOTS
+                )
+                if installed:
                     # --nofork: without it the CLI forks the app and exits 0
                     # immediately — a fake death to the liveness check (real-
                     # device v0.1.7 log).
