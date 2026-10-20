@@ -84,14 +84,14 @@ git clone --depth 1 https://github.com/nvm-sh/nvm.git ~/.nvm && cd ~/.nvm && ./i
 
 ```sh
 curl -L -o dsh-decky.zip \
-  https://github.com/3570548848/dsh-decky/releases/download/v0.1.2/dsh-decky.zip
+  https://github.com/3570548848/dsh-decky/releases/latest/download/dsh-decky.zip
 ```
 
 - **Decky UI**: Settings → Developer → Install plugin from zip → reload the loader
 - **Manually**: `unzip dsh-decky.zip -d ~/homebrew/plugins/`
 
-> Use **v0.1.2 explicitly**, not `/releases/latest`: `latest` currently resolves to v0.1.1 (no Mode
-> B) because v0.1.2 is marked prerelease and therefore skipped.
+> The `/releases/latest/download/` URL above always points at the newest full release (currently
+> v0.1.15). To pin a version, replace `latest` with a tag, e.g. `v0.1.15`.
 
 The archive must contain **exactly one top-level directory** (`dsh-decky/plugin.json`) — a hard
 requirement of Decky's installer, which does `extractall` straight into `~/homebrew/plugins/`.

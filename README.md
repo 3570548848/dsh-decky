@@ -74,13 +74,13 @@ git clone --depth 1 https://github.com/nvm-sh/nvm.git ~/.nvm && cd ~/.nvm && ./i
 
 ```sh
 curl -L -o dsh-decky.zip \
-  https://github.com/3570548848/dsh-decky/releases/download/v0.1.2/dsh-decky.zip
+  https://github.com/3570548848/dsh-decky/releases/latest/download/dsh-decky.zip
 ```
 
 - **Decky 界面**：设置 → 开发者 → 从 zip 安装插件 → 重载 loader
 - **手动**：`unzip dsh-decky.zip -d ~/homebrew/plugins/`
 
-> 请**明确用 v0.1.2**，不要用 `/releases/latest`：后者目前指向 v0.1.1（不含方案 B），因为 v0.1.2 标着 prerelease 被跳过了。
+> 用上面的 `/releases/latest/download/` 即可，它始终指向最新正式版（当前 v0.1.15）。想锁版本就把 `latest` 换成具体 tag，例如 `v0.1.15`。
 
 压缩包内必须是**恰好一层顶层目录**（`dsh-decky/plugin.json`）——这是 Decky 安装器 `extractall` 的硬性要求，打包脚本与测试都会校验。
 
