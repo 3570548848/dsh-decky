@@ -1,6 +1,6 @@
 {
   "name": "dsh-decky",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Decky Loader plugin: run and open the DeepSeek Harness (dsh) web agent inside Steam Gaming Mode.",
   "type": "module",
   "scripts": {

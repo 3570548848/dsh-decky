@@ -657,38 +657,50 @@ class Plugin:
     # ------------------------------------------------------------------
 
     def _find_browser(self) -> Optional[Dict[str, str]]:
-        """Locate a browser for standalone-window mode.
+        """Locate a browser for standalone-window mode (first candidate)."""
+        browsers = self._all_browsers()
+        return browsers[0] if browsers else None
 
-        Returns ``{"argv": [...], "label": ..., "env"?: {...}}`` where argv is
-        the command prefix (without the URL), or None when nothing usable was
-        found. If `env` is present the spawner must merge it into the child
-        environment.
+    def _all_browsers(self) -> List[Dict[str, str]]:
+        """Every usable browser, best-first.
+
+        Returns a list of ``{"argv", "family", "label", "env"?}``. The spawner
+        tries them in order until one survives launch — real-device history:
+        the exports/bin wrapper (`flatpak run` in disguise) died with exit 1
+        without a session bus, and a bare direct-exec can die on missing
+        runtime libs, so no single candidate is trustworthy on its own.
         """
-        # 1) Flatpak browsers exec'd directly from the app tree. First because
-        #    the exports/bin wrappers are `flatpak run` in disguise, which dies
-        #    in the plugin process (exit code 1, no session bus) — real-device
-        #    report, v0.1.4.
+        out: List[Dict[str, str]] = []
+        # 1) Flatpak direct exec of the real binary (no sandbox, no bus needed).
         direct = self._find_flatpak_direct()
         if direct:
-            return direct
+            out.append(direct)
         # 2) Native installs.
         for candidate, family in BROWSER_CANDIDATES:
             found = self._expand(candidate)
             if found:
-                return {"argv": [found], "family": family, "label": found}
-        # 3) Last resort: `flatpak run <app-id>` via the CLI.
-        flatpak = shutil.which("flatpak")
+                out.append({"argv": [found], "family": family, "label": found})
+        # 3) `flatpak run <app-id>` — the sandboxed, fully-supported path,
+        #    given a session bus by _gui_env (its absence was the exit-1 cause).
+        flatpak = shutil.which("flatpak") or self._expand("/usr/bin/flatpak")
         if flatpak:
             for app_id, family in FLATPAK_BROWSERS:
-                probe = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                    [flatpak, "info", app_id],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=8,
-                )
+                try:
+                    probe = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                        [flatpak, "info", app_id],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=8,
+                    )
+                except Exception:  # noqa: BLE001 - probe failure just skips
+                    continue
                 if probe.returncode == 0:
-                    return {"argv": [flatpak, "run", app_id], "family": family, "label": f"flatpak:{app_id}"}
-        return None
+                    out.append({
+                        "argv": [flatpak, "run", app_id],
+                        "family": family,
+                        "label": f"flatpak:{app_id}",
+                    })
+        return out
 
     def _find_flatpak_direct(self) -> Optional[Dict[str, str]]:
         """Exec a flatpak browser binary straight out of its app tree.
@@ -751,6 +763,13 @@ class Plugin:
         # Gamescope exposes this in Gaming Mode; setting it is harmless when
         # there is no gamescope and helpful when there is.
         env.setdefault("WAYLAND_DISPLAY", "gamescope-0")
+        # `flatpak run` needs the session bus (portals); a systemd user
+        # instance always owns this socket, and the Decky service process just
+        # never inherits the address. Its absence was the exit-1 cause.
+        if not env.get("DBUS_SESSION_BUS_ADDRESS"):
+            bus = os.path.join(env["XDG_RUNTIME_DIR"], "bus")
+            if os.path.exists(bus):
+                env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
         for key, value in (extra or {}).items():
             env[key] = f"{value}:{env[key]}" if env.get(key) else value
         return env
@@ -778,8 +797,8 @@ class Plugin:
                 }
             return {"ok": False, "reason": "not-running", "advice": "引擎尚未运行，请先点「启动并打开 DSH」。"}
 
-        browser = self._find_browser()
-        if browser is None:
+        browsers = self._all_browsers()
+        if not browsers:
             return {
                 "ok": False,
                 "reason": "no-browser",
@@ -789,9 +808,28 @@ class Plugin:
                 ),
             }
 
+        # Try each candidate; one that dies on launch hands off to the next.
+        # Full stderr goes to the panel log (Decky toasts truncate their
+        # body — an error code squeezed into a toast is unreadable).
+        failures: List[str] = []
+        for browser in browsers:
+            result = await self._spawn_browser(browser, url)
+            if result["ok"]:
+                return result
+            failures.append(f"{browser.get('label')}: {result.get('failNote') or result.get('reason')}")
+        return {
+            "ok": False,
+            "reason": "all-exited",
+            "advice": (
+                "所有候选浏览器启动即退：" + " | ".join(failures)[:200]
+                + "。完整错误输出请点「查看日志」。"
+            ),
+        }
+
+    async def _spawn_browser(self, browser: Dict[str, Any], url: str) -> Dict[str, Any]:
+        """Spawn one browser candidate; ok only if it survives ~2.5 s."""
         # A direct-exec flatpak browser also needs a writable profile dir
         # (its sandbox-side defaults are unavailable outside `flatpak run`).
-        child_env = dict(browser.get("env") or {})
         pre_flags: List[str] = []
         if str(browser.get("label", "")).startswith("flatpak-direct") and browser.get("family") == "firefox":
             profile = os.path.join(
@@ -808,61 +846,56 @@ class Plugin:
             os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"dsh-decky-browser-{os.getpid()}.err"
         )
         try:
-            err_file = open(err_path, "wb")  # noqa: SIM115 - handed to subprocess
+            err_file = open(err_path, "wb")  # noqa: SIM115 - closed below
         except OSError:
             err_file = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
-                env=self._gui_env(child_env),
+                env=self._gui_env(dict(browser.get("env") or {})),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=err_file if err_file else asyncio.subprocess.DEVNULL,
                 start_new_session=True,
             )
         except FileNotFoundError as exc:
-            return {"ok": False, "reason": "spawn-failed", "advice": f"无法执行 {argv[0]}：{exc}"}
+            return {"ok": False, "reason": "spawn-failed", "failNote": f"无法执行 {argv[0]}"}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "reason": "spawn-failed", "advice": str(exc)}
+            return {"ok": False, "reason": "spawn-failed", "failNote": str(exc)[:120]}
         finally:
             if err_file:
                 err_file.close()
 
         # Give it a moment: if the process exits within ~2.5 s, the window
-        # never had a chance to appear — report the exit code + stderr tail
-        # instead of a false "opened".
+        # never had a chance to appear — that candidate is dead, move on.
         try:
             rc = await asyncio.wait_for(proc.wait(), timeout=2.5)
         except asyncio.TimeoutError:
             rc = None
+        tail = ""
         if rc is not None:
-            tail = ""
             try:
                 with open(err_path, "rb") as fh:
-                    tail = fh.read()[-1200:].decode("utf-8", "replace")
+                    tail = fh.read()[-4000:].decode("utf-8", "replace")
             except OSError:
                 pass
-            try:
-                os.unlink(err_path)
-            except OSError:
-                pass
-            decky.logger.warning("browser exited immediately: rc=%s tail=%s", rc, tail)
-            return {
-                "ok": False,
-                "reason": "exited",
-                "advice": (
-                    f"浏览器进程启动后 {2.5} 秒内退出了（退出码 {rc}）。"
-                    + (f" 错误输出：{tail.strip()[:400]}" if tail.strip() else
-                       " 没有错误输出，可能是显示环境不可用；试试桌面模式先开一次该浏览器。")
-                ),
-                "stderrTail": tail[-400:],
-            }
         try:
             os.unlink(err_path)
         except OSError:
             pass
+        if rc is not None:
+            self.log_lines.append(f"[外部窗口] {browser.get('label')} 启动即退（退出码 {rc}）")
+            for line in (tail.strip() or "（无 stderr 输出）").splitlines()[:40]:
+                self.log_lines.append(f"[外部窗口] {line}")
+            decky.logger.warning("browser exited immediately: rc=%s tail=%s", rc, tail[:500])
+            return {
+                "ok": False,
+                "reason": "exited",
+                "failNote": f"退出码 {rc}" + (f"：{tail.strip()[:120]}" if tail.strip() else ""),
+            }
 
-        # Keep the handle so a later close can reach it, but do not block on it:
-        # the browser runs for as long as the user keeps the window open.
+        # Survived: keep the handle so a later close can reach it, but do not
+        # block on it — the browser runs for as long as the user keeps the
+        # window open.
         self._browser_proc = proc
         self._browser_argv = argv  # recorded for logging/close
         return {
