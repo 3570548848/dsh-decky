@@ -38,9 +38,26 @@ drains stdout, and resolves the printed token URL. It then waits for the port to
 connection before handing the URL onward — the printed line precedes the bind, so opening on the
 line alone would race.
 
-**Open.** The frontend calls `Navigation.NavigateToExternalWeb(url)` (`@decky/ui`), which routes the
-URL into Steam's built-in browser. The `SameSite=Strict` cookie is exactly why this is the only
-working route: it must be a top-level navigation, not a frame.
+**Open (two modes, switchable in settings).** Both satisfy `SameSite=Strict`, because both are
+**top-level navigations**:
+
+- **Mode A · Steam's built-in browser** (default): the frontend calls
+  `Navigation.NavigateToExternalWeb(url)` (`@decky/ui`), routing the URL into Steam's own browser.
+- **Mode B · external browser in a standalone window**: the plugin starts a real browser with a
+  chrome-less window.
+  - Chromium family (chromium / chrome / edge / brave / vivaldi) uses `--app=<url>`
+  - Firefox family has **no `--app`** and uses `--kiosk <url>`
+  - Discovery order: native paths (`/usr/bin`, Homebrew, nix, snap) → **flatpak** (probe with
+    `flatpak info`, then `flatpak run`)
+  - **GUI environment must be injected explicitly** (`DISPLAY`, `WAYLAND_DISPLAY`,
+    `XDG_RUNTIME_DIR`): a plugin is a service process and usually does not inherit them, so without
+    this the browser fails to start or stays invisible
+  - This path **avoids Steam's private APIs entirely** (`CreateBrowserView` / `findModuleChild`), so
+    it is more resilient to Steam updates; the trade-off is a window **overlaid on Gaming Mode**
+    rather than embedded in the panel
+
+> Why not an `<iframe>`: dsh's session cookie is `SameSite=Strict`, and an iframe is same-site
+> cross-origin, so it would arrive **without the cookie** and the UI would never load.
 
 **Survive.** `_unload` deliberately does **not** stop the engine. A plugin reload, or Steam resuming
 from suspend, must not kill an in-flight agent session. Stopping is an explicit user action.

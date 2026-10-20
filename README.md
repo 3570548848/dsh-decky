@@ -28,7 +28,17 @@
 
 **启动。** 后端在**独立进程组**里拉起 `dsh --profile web --no-open --port <N>`，持续读取 stdout，解析出打印的带令牌 URL。之后它会**先等端口真正能接受连接**再把 URL 交出去——因为打印那一行发生在端口绑定之前，只看那一行就打开会有竞态。
 
-**打开。** 前端调用 `Navigation.NavigateToExternalWeb(url)`（来自 `@decky/ui`），把 URL 交给 Steam 自带浏览器。正因为那个 `SameSite=Strict` Cookie，这才是唯一可行的路径：必须是顶层导航，不能是 frame。
+**打开（两种方式，可按设置切换）。** 两种都满足 `SameSite=Strict` 的要求，因为两者都是**顶层导航**：
+
+- **方式 A · Steam 内置浏览器**（默认）：前端调用 `Navigation.NavigateToExternalWeb(url)`（来自 `@decky/ui`），把 URL 交给 Steam 自带浏览器。
+- **方式 B · 外部浏览器独立窗口**：插件自己启动一个真实浏览器，以无地址栏的窗口显示该 URL。
+  - Chromium 系（chromium / chrome / edge / brave / vivaldi）用 `--app=<url>`
+  - Firefox 系**没有 `--app`**，用 `--kiosk <url>`
+  - 探测顺序：原生路径（`/usr/bin`、Homebrew、nix、snap）→ **flatpak**（先 `flatpak info` 试探，再 `flatpak run`）
+  - **必须显式注入 GUI 环境变量**（`DISPLAY`、`WAYLAND_DISPLAY`、`XDG_RUNTIME_DIR`）：插件是服务进程，通常继承不到这些变量，缺了浏览器就起不来或不可见
+  - 这条路**完全绕开 Steam 未公开 API**（`CreateBrowserView` / `findModuleChild`），因此比方式 A 更抗 Steam 更新；代价是窗口**盖在 Gaming Mode 之上**，而非嵌在面板里
+
+> 为什么不用 `<iframe>`：dsh 的会话 Cookie 是 `SameSite=Strict`，iframe 属同站跨源，到达时**不带 Cookie**，界面出不来。
 
 **存活。** `_unload` 刻意**不**停止引擎。插件重载、或 Steam 从休眠恢复，都不该杀掉正在进行的 Agent 会话。停止是一个明确的用户动作。
 

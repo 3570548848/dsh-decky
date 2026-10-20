@@ -91,12 +91,15 @@ const getStatus = callable("status");
 const startEngine = callable("start");
 const stopEngine = callable("stop");
 const getLog = callable("get_log");
+const openExternal = callable("open_external");
+const closeExternal = callable("close_external");
+const browserProbe = callable("browser_probe");
 const probeEnv = callable("probe");
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 /**
- * Open the DSH GUI in Steam's own browser.
+ * Open the DSH GUI.
  *
  * dsh authenticates the browser with a launch token in the query string, then
  * mints an `HttpOnly; SameSite=Strict` cookie bound to the exact authority.
@@ -105,11 +108,32 @@ const probeEnv = callable("probe");
  * would arrive without the cookie, so it is not an option (verified against
  * dsh-client-connection: sessionCookie() pins SameSite=Strict + HttpOnly).
  *
- * `Navigation.NavigateToExternalWeb` is the documented route into Steam's
- * built-in browser. `Router.NavigateToExternalWeb` is the same operation on the
- * other exported surface, kept as a fallback in case one is unavailable.
+ * Two modes, chosen by the `open_with` setting:
+ *   - "builtin": route into Steam's own browser via NavigateToExternalWeb.
+ *   - "external" (plan B): start a real browser as a standalone window
+ *     (`chromium --app=<url>` / `firefox --kiosk <url>`). Both are top-level
+ *     navigations, so the strict cookie is satisfied either way.
  */
-function openGui(url) {
+async function openGui(url, mode) {
+    if (mode === "external") {
+        try {
+            const res = await openExternal();
+            if (res.ok) {
+                toaster.toast({ title: "已在外部窗口打开", body: res.browser ?? "" });
+                return;
+            }
+            // Fall back to the built-in browser rather than leaving a dead button,
+            // but say why — a silent fallback would hide a real configuration issue.
+            toaster.toast({
+                title: "外部窗口打开失败，改用内置浏览器",
+                body: (res.advice ?? res.reason ?? "").slice(0, 220),
+            });
+        }
+        catch (e) {
+            toaster.toast({ title: "外部窗口调用失败，改用内置浏览器", body: String(e).slice(0, 220) });
+        }
+    }
+    // Built-in browser path (also the fallback above).
     const attempts = [
         ["Navigation", () => DFL.Navigation.NavigateToExternalWeb(url)],
         ["Router", () => DFL.Router.NavigateToExternalWeb(url)],
@@ -146,6 +170,7 @@ function Content() {
     const [log, setLog] = SP_REACT.useState([]);
     const [busy, setBusy] = SP_REACT.useState(null);
     const [showAdvanced, setShowAdvanced] = SP_REACT.useState(false);
+    const [browserInfo, setBrowserInfo] = SP_REACT.useState(null);
     const refresh = async () => {
         try {
             const [c, s] = await Promise.all([getConfig(), getStatus()]);
@@ -184,7 +209,7 @@ function Content() {
             if (res.note) {
                 toaster.toast({ title: "复用已有实例", body: res.note });
             }
-            openGui(res.url);
+            await openGui(res.url, cfg?.config?.open_with ?? "builtin");
         }
         catch (e) {
             toaster.toast({ title: "启动失败", body: String(e).slice(0, 400) });
@@ -237,13 +262,68 @@ function Content() {
                                         : "运行中（由外部实例提供，非本插件启动）"
                                     : st?.error
                                         ? "未运行（上次启动出错）"
-                                        : "未运行" }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null || st?.running, onClick: doStart, children: busy === "start" ? "启动中…（可能需要 1–3 分钟冷启动）" : "启动并打开 DSH" }) }), st?.running && st?.url && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openGui(st.url), children: "\u6253\u5F00 DSH \u754C\u9762" }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null || !st?.managed, onClick: doStop, children: busy === "stop" ? "停止中…" : "停止引擎" }) }), st?.error && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u4E0A\u6B21\u9519\u8BEF", value: st.error, warn: true }) }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8DEF\u5F84", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node.js", value: cfg?.resolved?.node ?? "未找到 —— SteamOS 根目录只读，请装到 $HOME", warn: !cfg?.resolved?.node }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "dsh", value: cfg?.resolved?.dsh ?? "未找到", warn: !cfg?.resolved?.dsh }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6765\u6E90", value: cfg?.resolved?.source ?? "-" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null, onClick: doProbe, children: busy === "probe" ? "检测中…" : "环境自检（Node / bwrap / Landlock / 只读根）" }) }), probe && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node \u7248\u672C", value: probe.node?.version ?? "未知", warn: !probe.node?.version }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6839\u6587\u4EF6\u7CFB\u7EDF", value: probe.root_readonly === null ? "未知" : probe.root_readonly ? "/ 只读（SteamOS 典型）" : "/ 可写" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "bwrap", value: probe.bwrap?.path ? (probe.bwrap.usable ? "可用" : `不可用：${probe.bwrap.reason ?? "probe 失败"}`) : "未安装", warn: !probe.bwrap?.usable }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Landlock", value: String(probe.landlock?.usable ?? "不可用"), warn: !(probe.landlock?.usable === "full" || probe.landlock?.usable === "partial") }) }), verdict && !verdict.usable && verdict.advice && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6C99\u7BB1\u4E0D\u53EF\u7528", value: verdict.advice, warn: true }) })), !probe.node?.path && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node \u672A\u627E\u5230", value: "插件进程只继承精简的 PATH，不会加载你登录 shell 的环境。\n" +
+                                        : "未运行" }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null || st?.running, onClick: doStart, children: busy === "start" ? "启动中…（可能需要 1–3 分钟冷启动）" : "启动并打开 DSH" }) }), st?.running && st?.url && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openGui(st.url, cfg?.config?.open_with ?? "builtin"), children: "\u6253\u5F00 DSH \u754C\u9762\uFF08\u6309\u8BBE\u7F6E\u7684\u6253\u5F00\u65B9\u5F0F\uFF09" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null, onClick: async () => {
+                                        setBusy("ext");
+                                        try {
+                                            const res = await openExternal();
+                                            if (res.ok) {
+                                                toaster.toast({ title: "已在外部窗口打开", body: res.browser ?? "" });
+                                            }
+                                            else {
+                                                toaster.toast({
+                                                    title: "外部窗口打开失败",
+                                                    body: (res.advice ?? res.reason ?? "").slice(0, 260),
+                                                });
+                                            }
+                                        }
+                                        catch (e) {
+                                            toaster.toast({ title: "调用失败", body: String(e).slice(0, 260) });
+                                        }
+                                        finally {
+                                            setBusy(null);
+                                        }
+                                    }, children: busy === "ext" ? "打开中…" : "用外部窗口打开（方案 B）" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null, onClick: async () => {
+                                        try {
+                                            const res = await closeExternal();
+                                            toaster.toast({
+                                                title: res.closed ? "已关闭外部窗口" : "没有由本插件打开的外部窗口",
+                                                body: res.closed ? "已向浏览器进程发送终止信号。" : "插件只关闭自己启动的那个窗口。",
+                                            });
+                                        }
+                                        catch (e) {
+                                            toaster.toast({ title: "关闭失败", body: String(e) });
+                                        }
+                                    }, children: "\u5173\u95ED\u5916\u90E8\u7A97\u53E3" }) })] })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null || !st?.managed, onClick: doStop, children: busy === "stop" ? "停止中…" : "停止引擎" }) }), st?.error && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u4E0A\u6B21\u9519\u8BEF", value: st.error, warn: true }) }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8DEF\u5F84", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node.js", value: cfg?.resolved?.node ?? "未找到 —— SteamOS 根目录只读，请装到 $HOME", warn: !cfg?.resolved?.node }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "dsh", value: cfg?.resolved?.dsh ?? "未找到", warn: !cfg?.resolved?.dsh }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6765\u6E90", value: cfg?.resolved?.source ?? "-" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null, onClick: doProbe, children: busy === "probe" ? "检测中…" : "环境自检（Node / bwrap / Landlock / 只读根）" }) }), probe && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node \u7248\u672C", value: probe.node?.version ?? "未知", warn: !probe.node?.version }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6839\u6587\u4EF6\u7CFB\u7EDF", value: probe.root_readonly === null ? "未知" : probe.root_readonly ? "/ 只读（SteamOS 典型）" : "/ 可写" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "bwrap", value: probe.bwrap?.path ? (probe.bwrap.usable ? "可用" : `不可用：${probe.bwrap.reason ?? "probe 失败"}`) : "未安装", warn: !probe.bwrap?.usable }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Landlock", value: String(probe.landlock?.usable ?? "不可用"), warn: !(probe.landlock?.usable === "full" || probe.landlock?.usable === "partial") }) }), verdict && !verdict.usable && verdict.advice && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6C99\u7BB1\u4E0D\u53EF\u7528", value: verdict.advice, warn: true }) })), !probe.node?.path && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "Node \u672A\u627E\u5230", value: "插件进程只继承精简的 PATH，不会加载你登录 shell 的环境。\n" +
                                         "它看到的 PATH：" + (probe.path_env || "(空)") + "\n" +
                                         "试过的位置（均未命中）：\n" +
                                         ((probe.node?.tried ?? []).map((t) => "  " + t.path).join("\n") ||
                                             "(无记录)") +
                                         "\n→ 在下面「高级设置」里手动填写 Node 路径（发行版包通常在 /usr/bin/node，" +
-                                        "Homebrew 在 /home/linuxbrew/.linuxbrew/bin/node）。", warn: true }) })), (probe.diagnostics ?? []).length > 0 && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u8BCA\u65AD", value: probe.diagnostics.join("\n") }) }))] }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8BBE\u7F6E", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u7AEF\u53E3", value: String(cfg?.config?.port ?? 3080), mustBeNumeric: true, onChange: (e) => patch({ port: Number(e.target.value) || 3080 }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u968F\u63D2\u4EF6\u52A0\u8F7D\u81EA\u52A8\u542F\u52A8", description: "\u63D2\u4EF6\u52A0\u8F7D\u65F6\u540E\u53F0\u62C9\u8D77\u5F15\u64CE\uFF08\u4ECD\u9700\u624B\u52A8\u6253\u5F00\u754C\u9762\uFF09", checked: Boolean(cfg?.config?.autostart), onChange: (v) => patch({ autostart: v }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u663E\u793A\u9AD8\u7EA7\u8BBE\u7F6E", checked: showAdvanced, onChange: setShowAdvanced }) }), showAdvanced && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Node \u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.node_path ?? "", onChange: (e) => patch({ node_path: e.target.value }), description: "\u4F8B\u5982 /home/deck/.local/bin/node" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "dsh \u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.dsh_path ?? "", onChange: (e) => patch({ dsh_path: e.target.value }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u5DE5\u4F5C\u76EE\u5F55", value: cfg?.config?.workdir ?? "", onChange: (e) => patch({ workdir: e.target.value }), description: "Agent \u7684\u9ED8\u8BA4\u5DE5\u4F5C\u533A\uFF1B\u7559\u7A7A\u7528 $HOME" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u6743\u9650\u6863\u4F4D\uFF08DSH_PERMISSION_MODE\uFF09", value: cfg?.config?.permission_mode ?? "", onChange: (e) => patch({ permission_mode: e.target.value }), description: "\u7559\u7A7A\u7528 DSH \u9ED8\u8BA4\uFF1B\u6C99\u7BB1\u4E0D\u53EF\u7528\u65F6\u8BBE\u4E3A danger-full-access" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "\u6743\u9650\u6863\u4F4D\u9884\u8BBE", rgOptions: [
+                                        "Homebrew 在 /home/linuxbrew/.linuxbrew/bin/node）。", warn: true }) })), (probe.diagnostics ?? []).length > 0 && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u8BCA\u65AD", value: probe.diagnostics.join("\n") }) }))] }))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "\u8BBE\u7F6E", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u7AEF\u53E3", value: String(cfg?.config?.port ?? 3080), mustBeNumeric: true, onChange: (e) => patch({ port: Number(e.target.value) || 3080 }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "\u6253\u5F00\u65B9\u5F0F", description: "\u65B9\u6848 A\uFF1A\u8D70 Steam \u5185\u7F6E\u6D4F\u89C8\u5668\uFF1B\u65B9\u6848 B\uFF1A\u7528\u5916\u90E8\u6D4F\u89C8\u5668\u5F00\u72EC\u7ACB\u7A97\u53E3", rgOptions: [
+                                { data: "builtin", label: "A · Steam 内置浏览器（面板内跳转）" },
+                                { data: "external", label: "B · 外部浏览器独立窗口" },
+                            ], selectedOption: cfg?.config?.open_with ?? "builtin", onChange: (opt) => patch({ open_with: String(opt.data) }) }) }), (cfg?.config?.open_with ?? "builtin") === "external" && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy !== null, onClick: async () => {
+                                setBusy("bp");
+                                try {
+                                    const bp = await browserProbe();
+                                    setBrowserInfo(bp);
+                                    toaster.toast({
+                                        title: bp.found ? "找到浏览器" : "未找到浏览器",
+                                        body: bp.found
+                                            ? `${bp.label}（${bp.family}）`
+                                            : "请安装 Chromium/Chrome/Firefox 或 flatpak 版浏览器",
+                                    });
+                                }
+                                catch (e) {
+                                    toaster.toast({ title: "探测失败", body: String(e) });
+                                }
+                                finally {
+                                    setBusy(null);
+                                }
+                            }, children: busy === "bp" ? "探测中…" : "探测可用浏览器" }) })), (cfg?.config?.open_with ?? "builtin") === "external" && browserInfo && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6D4F\u89C8\u5668", value: browserInfo.found
+                                ? `${browserInfo.label}（${browserInfo.family}）`
+                                : `未找到。已查找：${(browserInfo.candidates ?? []).join("、")}` +
+                                    (browserInfo.flatpak ? "（flatpak 可用但无匹配应用）" : "（flatpak 未安装）"), warn: !browserInfo.found }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u968F\u63D2\u4EF6\u52A0\u8F7D\u81EA\u52A8\u542F\u52A8", description: "\u63D2\u4EF6\u52A0\u8F7D\u65F6\u540E\u53F0\u62C9\u8D77\u5F15\u64CE\uFF08\u4ECD\u9700\u624B\u52A8\u6253\u5F00\u754C\u9762\uFF09", checked: Boolean(cfg?.config?.autostart), onChange: (v) => patch({ autostart: v }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u663E\u793A\u9AD8\u7EA7\u8BBE\u7F6E", checked: showAdvanced, onChange: setShowAdvanced }) }), showAdvanced && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Node \u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.node_path ?? "", onChange: (e) => patch({ node_path: e.target.value }), description: "\u4F8B\u5982 /home/deck/.local/bin/node" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "dsh \u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.dsh_path ?? "", onChange: (e) => patch({ dsh_path: e.target.value }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u5DE5\u4F5C\u76EE\u5F55", value: cfg?.config?.workdir ?? "", onChange: (e) => patch({ workdir: e.target.value }), description: "Agent \u7684\u9ED8\u8BA4\u5DE5\u4F5C\u533A\uFF1B\u7559\u7A7A\u7528 $HOME" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u6743\u9650\u6863\u4F4D\uFF08DSH_PERMISSION_MODE\uFF09", value: cfg?.config?.permission_mode ?? "", onChange: (e) => patch({ permission_mode: e.target.value }), description: "\u7559\u7A7A\u7528 DSH \u9ED8\u8BA4\uFF1B\u6C99\u7BB1\u4E0D\u53EF\u7528\u65F6\u8BBE\u4E3A danger-full-access" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "\u6743\u9650\u6863\u4F4D\u9884\u8BBE", rgOptions: [
                                         { data: "", label: "（留空，用 DSH 默认）" },
                                         { data: "danger-full-access", label: "danger-full-access（绕过沙箱）" },
                                         { data: "workspace-write", label: "workspace-write" },

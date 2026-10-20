@@ -241,6 +241,35 @@ async def test_root_readonly_detection() -> None:
     check("probe completes without raising", writable in (True, False))
 
 
+def test_external_window_mode() -> None:
+    """Plan B: standalone browser window (no Steam private APIs).
+
+    Pins the facts that make it work: per-family argv (Chromium takes --app,
+    Firefox has no --app and needs --kiosk), the GUI env a service process
+    must inject, and the refusal to pretend it can drive a foreign instance.
+    """
+    print("\nExternal-window mode (plan B)")
+    src = open(os.path.join(REPO, "main.py"), encoding="utf-8").read()
+
+    check("Chromium uses --app=", '"--app="' in src or "f\"--app={url}\"" in src)
+    check("Firefox falls back to --kiosk", '"--kiosk"' in src)
+    check("GUI env is injected (DISPLAY)", 'setdefault("DISPLAY"' in src)
+    check("GUI env injects WAYLAND_DISPLAY", 'setdefault("WAYLAND_DISPLAY"' in src)
+    check("GUI env injects XDG_RUNTIME_DIR", 'setdefault("XDG_RUNTIME_DIR"' in src)
+    check("flatpak browsers are probed", "flatpak" in src and "FLATPAK_BROWSERS" in src)
+    check("own process group for the window", "start_new_session=True" in src)
+    check("close uses killpg", "killpg" in src)
+    check("refuses a foreign instance instead of faking success",
+          "external-instance" in src)
+
+    # The settings key that selects the mode must actually be consumed.
+    ui = open(os.path.join(REPO, "src/index.tsx"), encoding="utf-8").read()
+    check("open_with is offered in the UI", 'data: "external"' in ui)
+    check("open_with drives the open path", "openGui(res.url, cfg?.config?.open_with" in ui)
+    check("a browser probe button exists", "browserProbe()" in ui)
+
+
+
 def test_zip_layout() -> None:
     """Reproduce Decky's installer checks against the packaged zip.
 
@@ -327,6 +356,7 @@ def main_entry() -> int:
         asyncio.run(check_fn())
     test_probe_matches_dsh()
     test_path_diagnostics()
+    test_external_window_mode()
     test_zip_layout()
     print(f"\nAll {PASSED} checks passed.")
     return 0

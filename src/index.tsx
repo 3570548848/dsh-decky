@@ -85,6 +85,16 @@ const getStatus = callable<[], StatusReply>("status");
 const startEngine = callable<[], { ok: boolean; url: string; reused?: boolean; port: number; note?: string }>("start");
 const stopEngine = callable<[], { ok: boolean; stopped: boolean }>("stop");
 const getLog = callable<[], { lines: string[] }>("get_log");
+const openExternal = callable<[], { ok: boolean; reason?: string; advice?: string; argv?: string[]; browser?: string }>("open_external");
+const closeExternal = callable<[], { ok: boolean; closed: boolean }>("close_external");
+const browserProbe = callable<[], {
+  found: boolean;
+  label?: string;
+  family?: string;
+  argv?: string[];
+  flatpak?: boolean;
+  candidates?: string[];
+}>("browser_probe");
 const probeEnv = callable<[], ProbeReply>("probe");
 
 // ---------------------------------------------------------------------------
@@ -92,7 +102,7 @@ const probeEnv = callable<[], ProbeReply>("probe");
 // ---------------------------------------------------------------------------
 
 /**
- * Open the DSH GUI in Steam's own browser.
+ * Open the DSH GUI.
  *
  * dsh authenticates the browser with a launch token in the query string, then
  * mints an `HttpOnly; SameSite=Strict` cookie bound to the exact authority.
@@ -101,11 +111,32 @@ const probeEnv = callable<[], ProbeReply>("probe");
  * would arrive without the cookie, so it is not an option (verified against
  * dsh-client-connection: sessionCookie() pins SameSite=Strict + HttpOnly).
  *
- * `Navigation.NavigateToExternalWeb` is the documented route into Steam's
- * built-in browser. `Router.NavigateToExternalWeb` is the same operation on the
- * other exported surface, kept as a fallback in case one is unavailable.
+ * Two modes, chosen by the `open_with` setting:
+ *   - "builtin": route into Steam's own browser via NavigateToExternalWeb.
+ *   - "external" (plan B): start a real browser as a standalone window
+ *     (`chromium --app=<url>` / `firefox --kiosk <url>`). Both are top-level
+ *     navigations, so the strict cookie is satisfied either way.
  */
-function openGui(url: string) {
+async function openGui(url: string, mode: string): Promise<void> {
+  if (mode === "external") {
+    try {
+      const res = await openExternal();
+      if (res.ok) {
+        toaster.toast({ title: "已在外部窗口打开", body: res.browser ?? "" });
+        return;
+      }
+      // Fall back to the built-in browser rather than leaving a dead button,
+      // but say why — a silent fallback would hide a real configuration issue.
+      toaster.toast({
+        title: "外部窗口打开失败，改用内置浏览器",
+        body: (res.advice ?? res.reason ?? "").slice(0, 220),
+      });
+    } catch (e) {
+      toaster.toast({ title: "外部窗口调用失败，改用内置浏览器", body: String(e).slice(0, 220) });
+    }
+  }
+
+  // Built-in browser path (also the fallback above).
   const attempts: Array<[string, () => void]> = [
     ["Navigation", () => Navigation.NavigateToExternalWeb(url)],
     ["Router", () => (Router as any).NavigateToExternalWeb(url)],
@@ -152,6 +183,13 @@ function Content() {
   const [log, setLog] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [browserInfo, setBrowserInfo] = useState<{
+    found: boolean;
+    label?: string;
+    family?: string;
+    flatpak?: boolean;
+    candidates?: string[];
+  } | null>(null);
 
   const refresh = async () => {
     try {
@@ -191,7 +229,7 @@ function Content() {
       if (res.note) {
         toaster.toast({ title: "复用已有实例", body: res.note });
       }
-      openGui(res.url);
+      await openGui(res.url, cfg?.config?.open_with ?? "builtin");
     } catch (e) {
       toaster.toast({ title: "启动失败", body: String(e).slice(0, 400) });
       setLog((await getLog().catch(() => ({ lines: [] }))).lines);
@@ -263,11 +301,61 @@ function Content() {
         </PanelSectionRow>
 
         {st?.running && st?.url && (
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={() => openGui(st.url as string)}>
-              打开 DSH 界面
-            </ButtonItem>
-          </PanelSectionRow>
+          <>
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                onClick={() => openGui(st.url as string, cfg?.config?.open_with ?? "builtin")}
+              >
+                打开 DSH 界面（按设置的打开方式）
+              </ButtonItem>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                disabled={busy !== null}
+                onClick={async () => {
+                  setBusy("ext");
+                  try {
+                    const res = await openExternal();
+                    if (res.ok) {
+                      toaster.toast({ title: "已在外部窗口打开", body: res.browser ?? "" });
+                    } else {
+                      toaster.toast({
+                        title: "外部窗口打开失败",
+                        body: (res.advice ?? res.reason ?? "").slice(0, 260),
+                      });
+                    }
+                  } catch (e) {
+                    toaster.toast({ title: "调用失败", body: String(e).slice(0, 260) });
+                  } finally {
+                    setBusy(null);
+                  }
+                }}
+              >
+                {busy === "ext" ? "打开中…" : "用外部窗口打开（方案 B）"}
+              </ButtonItem>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                disabled={busy !== null}
+                onClick={async () => {
+                  try {
+                    const res = await closeExternal();
+                    toaster.toast({
+                      title: res.closed ? "已关闭外部窗口" : "没有由本插件打开的外部窗口",
+                      body: res.closed ? "已向浏览器进程发送终止信号。" : "插件只关闭自己启动的那个窗口。",
+                    });
+                  } catch (e) {
+                    toaster.toast({ title: "关闭失败", body: String(e) });
+                  }
+                }}
+              >
+                关闭外部窗口
+              </ButtonItem>
+            </PanelSectionRow>
+          </>
         )}
 
         <PanelSectionRow>
@@ -367,6 +455,59 @@ function Content() {
             onChange={(e) => patch({ port: Number(e.target.value) || 3080 })}
           />
         </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="打开方式"
+            description="方案 A：走 Steam 内置浏览器；方案 B：用外部浏览器开独立窗口"
+            rgOptions={[
+              { data: "builtin", label: "A · Steam 内置浏览器（面板内跳转）" },
+              { data: "external", label: "B · 外部浏览器独立窗口" },
+            ]}
+            selectedOption={cfg?.config?.open_with ?? "builtin"}
+            onChange={(opt) => patch({ open_with: String(opt.data) })}
+          />
+        </PanelSectionRow>
+        {(cfg?.config?.open_with ?? "builtin") === "external" && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== null}
+              onClick={async () => {
+                setBusy("bp");
+                try {
+                  const bp = await browserProbe();
+                  setBrowserInfo(bp);
+                  toaster.toast({
+                    title: bp.found ? "找到浏览器" : "未找到浏览器",
+                    body: bp.found
+                      ? `${bp.label}（${bp.family}）`
+                      : "请安装 Chromium/Chrome/Firefox 或 flatpak 版浏览器",
+                  });
+                } catch (e) {
+                  toaster.toast({ title: "探测失败", body: String(e) });
+                } finally {
+                  setBusy(null);
+                }
+              }}
+            >
+              {busy === "bp" ? "探测中…" : "探测可用浏览器"}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {(cfg?.config?.open_with ?? "builtin") === "external" && browserInfo && (
+          <PanelSectionRow>
+            <Row
+              label="浏览器"
+              value={
+                browserInfo.found
+                  ? `${browserInfo.label}（${browserInfo.family}）`
+                  : `未找到。已查找：${(browserInfo.candidates ?? []).join("、")}` +
+                    (browserInfo.flatpak ? "（flatpak 可用但无匹配应用）" : "（flatpak 未安装）")
+              }
+              warn={!browserInfo.found}
+            />
+          </PanelSectionRow>
+        )}
         <PanelSectionRow>
           <ToggleField
             label="随插件加载自动启动"

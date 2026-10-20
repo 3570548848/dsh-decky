@@ -30,6 +30,7 @@ import re
 import shutil
 import signal
 import socket
+import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +50,35 @@ URL_LINE = re.compile(r"dsh web:\s*(https?://\S+)")
 # Wall-clock budget for a cold boot: dependency resolution can be slow on a
 # handheld, but a hung boot must not leave the panel spinning forever.
 STARTUP_TIMEOUT_S = 180.0
+
+# Browsers usable for the "external window" mode, as (path, family) pairs.
+# `family` decides the argv: Chromium-family takes `--app=<url>` for a
+# standalone window; Firefox-family has no --app and needs `--kiosk <url>`.
+BROWSER_CANDIDATES = [
+    ("/usr/bin/chromium", "chromium"),
+    ("/usr/bin/chromium-browser", "chromium"),
+    ("/usr/bin/google-chrome-stable", "chromium"),
+    ("/usr/bin/google-chrome", "chromium"),
+    ("/usr/bin/microsoft-edge-stable", "chromium"),
+    ("/usr/bin/brave-browser", "chromium"),
+    ("/usr/bin/vivaldi-stable", "chromium"),
+    ("/home/linuxbrew/.linuxbrew/bin/chromium", "chromium"),
+    ("~/.local/bin/chromium", "chromium"),
+    ("/nix/var/nix/profiles/default/bin/chromium", "chromium"),
+    ("/snap/bin/chromium", "chromium"),
+    ("/usr/bin/firefox", "firefox"),
+    ("/usr/bin/librewolf", "firefox"),
+    ("/usr/bin/firefox-esr", "firefox"),
+]
+
+# Flatpak app ids, tried when no native browser was found. SteamOS ships
+# flatpak and many users install a browser that way.
+FLATPAK_BROWSERS = [
+    ("org.chromium.Chromium", "chromium"),
+    ("com.google.Chrome", "chromium"),
+    ("org.mozilla.firefox", "firefox"),
+    ("io.gitlab.librewolf-community", "firefox"),
+]
 
 # Where a Node.js may land on a SteamOS-class system. Ordered by likelihood:
 # a distro/Homebrew install beats a per-user version manager, because the
@@ -119,6 +149,9 @@ class Plugin:
         self._reader_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._config: Dict[str, Any] = {}
+        # Plan B: the browser window this plugin opened, so it can be closed.
+        self._browser_proc: Optional[asyncio.subprocess.Process] = None
+        self._browser_argv: Optional[List[str]] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -587,6 +620,146 @@ class Plugin:
     async def get_log(self) -> Dict[str, Any]:
         """Bounded engine output tail for the settings panel."""
         return {"lines": self.log_lines[-120:]}
+
+    # ------------------------------------------------------------------
+    # External-window mode (plan B)
+    # ------------------------------------------------------------------
+
+    def _find_browser(self) -> Optional[Dict[str, str]]:
+        """Locate a browser for standalone-window mode.
+
+        Returns ``{"argv": [...], "label": ...}`` where argv is the command
+        prefix (without the URL), or None when nothing usable was found.
+        """
+        for candidate, family in BROWSER_CANDIDATES:
+            found = self._expand(candidate)
+            if found:
+                return {"argv": [found], "family": family, "label": found}
+        # Flatpak fallback: `flatpak run <app-id>` exists only if flatpak does.
+        flatpak = shutil.which("flatpak")
+        if flatpak:
+            for app_id, family in FLATPAK_BROWSERS:
+                probe = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                    [flatpak, "info", app_id],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=8,
+                )
+                if probe.returncode == 0:
+                    return {"argv": [flatpak, "run", app_id], "family": family, "label": f"flatpak:{app_id}"}
+        return None
+
+    def _browser_command(self, browser: Dict[str, str], url: str) -> List[str]:
+        """Build the argv that opens `url` in a standalone window."""
+        if browser.get("family") == "firefox":
+            # Firefox has no --app; --kiosk gives a chrome-less fullscreen window.
+            return [*browser["argv"], "--kiosk", url]
+        # Chromium family: --app=<url> is the documented standalone-window form.
+        return [*browser["argv"], f"--app={url}", "--start-maximized"]
+
+    @staticmethod
+    def _gui_env() -> Dict[str, str]:
+        """Environment for a GUI process launched from a service context.
+
+        A Decky plugin runs as a service process. On a SteamOS-class system the
+        display variables may not be inherited, and without them the browser
+        starts headless-invisible or dies. Fill in the conventional Gaming Mode
+        values when they are absent.
+        """
+        env = dict(os.environ)
+        env.setdefault("DISPLAY", ":0")
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        # Gamescope exposes this in Gaming Mode; setting it is harmless when
+        # there is no gamescope and helpful when there is.
+        env.setdefault("WAYLAND_DISPLAY", "gamescope-0")
+        return env
+
+    async def open_external(self) -> Dict[str, Any]:
+        """Open the running engine's URL in a standalone browser window.
+
+        Plan B: rather than routing into Steam's built-in CEF, start a real
+        browser with a chrome-less window. That keeps the plugin off Steam's
+        private APIs. The window is a normal top-level navigation, so the
+        engine's `SameSite=Strict` cookie still works.
+        """
+        url = self.url
+        if not url:
+            port = int(self._config.get("port") or DEFAULT_PORT)
+            if await self._port_open(DEFAULT_HOST, port):
+                return {
+                    "ok": False,
+                    "reason": "external-instance",
+                    "advice": (
+                        "当前端口上运行的是插件之外启动的引擎，插件拿不到它的启动令牌，"
+                        "外部浏览器也无法完成鉴权。请改用插件自己启动引擎（换一个端口，"
+                        "例如 3081），或先停掉那个实例。"
+                    ),
+                }
+            return {"ok": False, "reason": "not-running", "advice": "引擎尚未运行，请先点「启动并打开 DSH」。"}
+
+        browser = self._find_browser()
+        if browser is None:
+            return {
+                "ok": False,
+                "reason": "no-browser",
+                "advice": (
+                    "没有找到可用的浏览器。请安装一个（Chromium/Chrome/Firefox，"
+                    "或 flatpak 版），或先用「内置浏览器」方式打开。"
+                ),
+            }
+
+        argv = self._browser_command(browser, url)
+        decky.logger.info("opening external window: %s", " ".join(argv))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                env=self._gui_env(),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            return {"ok": False, "reason": "spawn-failed", "advice": f"无法执行 {argv[0]}：{exc}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": "spawn-failed", "advice": str(exc)}
+
+        # Keep the handle so a later close can reach it, but do not block on it:
+        # the browser runs for as long as the user keeps the window open.
+        self._browser_proc = proc
+        self._browser_argv = argv  # recorded for logging/close
+        return {"ok": True, "argv": argv, "browser": browser.get("label")}
+
+    async def browser_probe(self) -> Dict[str, Any]:
+        """Report which browser would be used, for the settings panel."""
+        browser = self._find_browser()
+        if browser is None:
+            return {
+                "found": False,
+                "candidates": [c for c, _ in BROWSER_CANDIDATES],
+                "flatpak": shutil.which("flatpak") is not None,
+            }
+        return {
+            "found": True,
+            "label": browser.get("label"),
+            "family": browser.get("family"),
+            "argv": browser.get("argv"),
+        }
+
+    async def close_external(self) -> Dict[str, Any]:
+        """Terminate the browser window this plugin opened, if any."""
+        proc = getattr(self, "_browser_proc", None)
+        if proc is None or proc.returncode is not None:
+            self._browser_proc = None
+            return {"ok": True, "closed": False}
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        self._browser_proc = None
+        return {"ok": True, "closed": True}
 
     # ------------------------------------------------------------------
     # Environment probes
