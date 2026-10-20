@@ -707,12 +707,15 @@ class Plugin:
 
         Skips the `flatpak run` wrapper entirely: finds the *active* deployment
         (current/versions are symlinks into a commit hash) and returns the real
-        exe plus the LD_LIBRARY_PATH it needs to find its bundled .so files.
+        exe plus the LD_LIBRARY_PATH it needs — the app's own libs AND the
+        freedesktop runtime's libs (GTK etc. live in the runtime tree, not the
+        app tree; without them the bare binary exits 1, real-device v0.1.5).
         """
         for root in FLATPAK_APP_ROOTS:
             root_abs = os.path.expanduser(root)
             if not os.path.isdir(root_abs):
                 continue
+            runtime_root = os.path.join(os.path.dirname(root_abs), "runtime")
             for app_id, rel_exe, rel_lib in FLATPAK_DIRECT:
                 # `active` is the canonical symlink to the running deployment;
                 # some flatpak versions only expose `current`.
@@ -723,15 +726,35 @@ class Plugin:
                     exe = os.path.join(active, rel_exe)
                     if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
                         continue
-                    lib = os.path.join(active, rel_lib)
+                    libs = [os.path.join(active, rel_lib)]
+                    libs.extend(self._flatpak_runtime_libs(runtime_root))
                     family = "firefox" if "firefox" in rel_exe else "chromium"
                     return {
                         "argv": [exe],
                         "family": family,
                         "label": f"flatpak-direct:{app_id}",
-                        "env": {"LD_LIBRARY_PATH": lib},
+                        "env": {"LD_LIBRARY_PATH": ":".join(libs)},
                     }
         return None
+
+    @staticmethod
+    def _flatpak_runtime_libs(runtime_root: str) -> List[str]:
+        """Library dirs of the newest org.freedesktop.Platform deployment."""
+        import glob as _glob
+
+        out: List[str] = []
+        patterns = [
+            os.path.join(runtime_root, "org.freedesktop.Platform", "*", "files", "lib"),
+            os.path.join(runtime_root, "org.freedesktop.Platform", "*", "files", "lib64"),
+            os.path.join(runtime_root, "org.freedesktop.Platform.ffmpeg", "*", "files", "lib"),
+        ]
+        for pat in patterns:
+            # Pick the newest version dir per pattern (versions sort lexically
+            # well enough for 25.x series; good enough for a launch path).
+            hits = sorted(_glob.glob(pat))
+            if hits:
+                out.append(hits[-1])
+        return out
 
     def _browser_command(self, browser: Dict[str, str], url: str,
                          pre_flags: Optional[List[str]] = None) -> List[str]:
@@ -763,6 +786,14 @@ class Plugin:
         # Gamescope exposes this in Gaming Mode; setting it is harmless when
         # there is no gamescope and helpful when there is.
         env.setdefault("WAYLAND_DISPLAY", "gamescope-0")
+        # On-device log (v0.1.6): the Decky service env's TMPDIR is poisoned,
+        # so SteamOS' PyInstaller-packaged /usr/bin/flatpak unpacked its
+        # bundled (older) OpenSSL into a mangled dir whose libs shadow the
+        # system ones — every run died with `version 'OPENSSL 3.5.0' not
+        # found`. Pin TMPDIR to the real /tmp and drop any inherited
+        # LD_LIBRARY_PATH shadowing (candidates that need it set their own).
+        env["TMPDIR"] = "/tmp"
+        env.pop("LD_LIBRARY_PATH", None)
         # `flatpak run` needs the session bus (portals); a systemd user
         # instance always owns this socket, and the Decky service process just
         # never inherits the address. Its absence was the exit-1 cause.
