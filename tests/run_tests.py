@@ -260,9 +260,11 @@ def test_external_window_mode() -> None:
     # Regression (real-device report): `flatpak info` can fail silently in the
     # Decky plugin process, so flatpak export dirs must also be scanned as
     # plain files in BROWSER_CANDIDATES.
-    check("flatpak export dirs scanned directly",
-          "/var/lib/flatpak/exports/bin/*firefox*" in src
-          and "~/.local/share/flatpak/exports/bin" in src)
+    # The exports/bin wrappers are `flatpak run` in disguise (fork + exit 0):
+    # they must NOT be candidates; the sandboxed path uses --nofork explicitly.
+    check("flatpak wrappers excluded; flatpak run uses --nofork",
+          "exports/bin/*firefox*\", \"firefox" not in src
+          and '"run", "--nofork"' in src)
     # Regression (real-device report, v0.1.4): the exports/bin wrapper is
     # `flatpak run` in disguise and dies with exit code 1 in the plugin
     # process; the app-tree binary must be exec'd directly with LD_LIBRARY_PATH.

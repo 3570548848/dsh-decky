@@ -74,12 +74,10 @@ BROWSER_CANDIDATES = [
     # `flatpak info` round-trip, which can fail silently in a Decky plugin
     # process (minimal PATH, no session bus) — the root cause of "installed
     # but not detected" reports. Globs are expanded by _expand().
-    ("/var/lib/flatpak/exports/bin/*firefox*", "firefox"),
-    ("/var/lib/flatpak/exports/bin/*chrom*", "chromium"),
-    ("/var/lib/flatpak/exports/bin/*librewolf*", "firefox"),
-    ("~/.local/share/flatpak/exports/bin/*firefox*", "firefox"),
-    ("~/.local/share/flatpak/exports/bin/*chrom*", "chromium"),
-    ("~/.local/share/flatpak/exports/bin/*librewolf*", "firefox"),
+    # NOTE: flatpak's exports/bin/* wrappers are deliberately NOT listed —
+    # they are `flatpak run` in disguise (fork + exit 0, a fake death that
+    # confuses the liveness check and can double-launch). The sandboxed path
+    # is tried as `flatpak run --nofork` at the end of _all_browsers().
     ("~/.local/bin/firefox", "firefox"),
 ]
 
@@ -695,8 +693,11 @@ class Plugin:
                 except Exception:  # noqa: BLE001 - probe failure just skips
                     continue
                 if probe.returncode == 0:
+                    # --nofork: without it the CLI forks the app and exits 0
+                    # immediately — a fake death to the liveness check (real-
+                    # device v0.1.7 log).
                     out.append({
-                        "argv": [flatpak, "run", app_id],
+                        "argv": [flatpak, "run", "--nofork", app_id],
                         "family": family,
                         "label": f"flatpak:{app_id}",
                     })
@@ -867,7 +868,16 @@ class Plugin:
                 os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dsh-decky-firefox-profile"
             )
             os.makedirs(profile, exist_ok=True)
-            pre_flags = [f"--profile={profile}"]
+            # --no-sandbox: outside `flatpak run` there is no user namespace
+            # for Firefox's own sandbox either (EPERM, same wall the flatpak
+            # sandbox hit — real-device v0.1.7 log).
+            pre_flags = [f"--profile={profile}", "--no-sandbox"]
+        elif str(browser.get("label", "")).startswith("flatpak-direct") and browser.get("family") == "chromium":
+            profile = os.path.join(
+                os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dsh-decky-chrome-profile"
+            )
+            os.makedirs(profile, exist_ok=True)
+            pre_flags = [f"--user-data-dir={profile}", "--no-sandbox"]
         argv = self._browser_command(browser, url, pre_flags=pre_flags)
         decky.logger.info("opening external window: %s", " ".join(argv))
         # Capture stderr to a file: a browser that dies on launch (missing
