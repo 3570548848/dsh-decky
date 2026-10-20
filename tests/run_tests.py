@@ -257,6 +257,12 @@ def test_external_window_mode() -> None:
     check("GUI env injects WAYLAND_DISPLAY", 'setdefault("WAYLAND_DISPLAY"' in src)
     check("GUI env injects XDG_RUNTIME_DIR", 'setdefault("XDG_RUNTIME_DIR"' in src)
     check("flatpak browsers are probed", "flatpak" in src and "FLATPAK_BROWSERS" in src)
+    # Regression (real-device report): `flatpak info` can fail silently in the
+    # Decky plugin process, so flatpak export dirs must also be scanned as
+    # plain files in BROWSER_CANDIDATES.
+    check("flatpak export dirs scanned directly",
+          "/var/lib/flatpak/exports/bin/*firefox*" in src
+          and "~/.local/share/flatpak/exports/bin" in src)
     check("own process group for the window", "start_new_session=True" in src)
     check("close uses killpg", "killpg" in src)
     check("refuses a foreign instance instead of faking success",

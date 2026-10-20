@@ -69,6 +69,18 @@ BROWSER_CANDIDATES = [
     ("/usr/bin/firefox", "firefox"),
     ("/usr/bin/librewolf", "firefox"),
     ("/usr/bin/firefox-esr", "firefox"),
+    # Flatpak export dirs: a browser installed with `flatpak install` lands
+    # here, never in /usr/bin. Checking the filesystem directly beats the
+    # `flatpak info` round-trip, which can fail silently in a Decky plugin
+    # process (minimal PATH, no session bus) — the root cause of "installed
+    # but not detected" reports. Globs are expanded by _expand().
+    ("/var/lib/flatpak/exports/bin/*firefox*", "firefox"),
+    ("/var/lib/flatpak/exports/bin/*chrom*", "chromium"),
+    ("/var/lib/flatpak/exports/bin/*librewolf*", "firefox"),
+    ("~/.local/share/flatpak/exports/bin/*firefox*", "firefox"),
+    ("~/.local/share/flatpak/exports/bin/*chrom*", "chromium"),
+    ("~/.local/share/flatpak/exports/bin/*librewolf*", "firefox"),
+    ("~/.local/bin/firefox", "firefox"),
 ]
 
 # Flatpak app ids, tried when no native browser was found. SteamOS ships
