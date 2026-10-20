@@ -722,24 +722,76 @@ class Plugin:
 
         argv = self._browser_command(browser, url)
         decky.logger.info("opening external window: %s", " ".join(argv))
+        # Capture stderr to a file: a browser that dies on launch (missing
+        # session bus for flatpak run, no display access, …) otherwise fails
+        # invisibly and the user only sees "opened" with no window.
+        err_path = os.path.join(
+            os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"dsh-decky-browser-{os.getpid()}.err"
+        )
+        try:
+            err_file = open(err_path, "wb")  # noqa: SIM115 - handed to subprocess
+        except OSError:
+            err_file = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 env=self._gui_env(),
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=err_file if err_file else asyncio.subprocess.DEVNULL,
                 start_new_session=True,
             )
         except FileNotFoundError as exc:
             return {"ok": False, "reason": "spawn-failed", "advice": f"无法执行 {argv[0]}：{exc}"}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "reason": "spawn-failed", "advice": str(exc)}
+        finally:
+            if err_file:
+                err_file.close()
+
+        # Give it a moment: if the process exits within ~2.5 s, the window
+        # never had a chance to appear — report the exit code + stderr tail
+        # instead of a false "opened".
+        try:
+            rc = await asyncio.wait_for(proc.wait(), timeout=2.5)
+        except asyncio.TimeoutError:
+            rc = None
+        if rc is not None:
+            tail = ""
+            try:
+                with open(err_path, "rb") as fh:
+                    tail = fh.read()[-1200:].decode("utf-8", "replace")
+            except OSError:
+                pass
+            try:
+                os.unlink(err_path)
+            except OSError:
+                pass
+            decky.logger.warning("browser exited immediately: rc=%s tail=%s", rc, tail)
+            return {
+                "ok": False,
+                "reason": "exited",
+                "advice": (
+                    f"浏览器进程启动后 {2.5} 秒内退出了（退出码 {rc}）。"
+                    + (f" 错误输出：{tail.strip()[:400]}" if tail.strip() else
+                       " 没有错误输出，可能是显示环境不可用；试试桌面模式先开一次该浏览器。")
+                ),
+                "stderrTail": tail[-400:],
+            }
+        try:
+            os.unlink(err_path)
+        except OSError:
+            pass
 
         # Keep the handle so a later close can reach it, but do not block on it:
         # the browser runs for as long as the user keeps the window open.
         self._browser_proc = proc
         self._browser_argv = argv  # recorded for logging/close
-        return {"ok": True, "argv": argv, "browser": browser.get("label")}
+        return {
+            "ok": True,
+            "argv": argv,
+            "browser": browser.get("label"),
+            "pid": proc.pid,
+        }
 
     async def browser_probe(self) -> Dict[str, Any]:
         """Report which browser would be used, for the settings panel."""
