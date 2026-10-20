@@ -254,7 +254,10 @@ def test_external_window_mode() -> None:
     check("Chromium uses --app=", '"--app="' in src or "f\"--app={url}\"" in src)
     check("Firefox falls back to --kiosk", '"--kiosk"' in src)
     check("GUI env is injected (DISPLAY)", 'setdefault("DISPLAY"' in src)
-    check("GUI env injects WAYLAND_DISPLAY", 'setdefault("WAYLAND_DISPLAY"' in src)
+    # v0.1.11 device log: injecting WAYLAND_DISPLAY crashes the flatpak'd
+    # Firefox (GDK IS SEAT assertion); the X11 route must be forced instead.
+    check("GUI env forces X11 and drops WAYLAND_DISPLAY",
+          'env.pop("WAYLAND_DISPLAY"' in src and 'GDK_BACKEND' in src)
     check("GUI env injects XDG_RUNTIME_DIR", 'setdefault("XDG_RUNTIME_DIR"' in src)
     check("flatpak browsers are probed", "flatpak" in src and "FLATPAK_BROWSERS" in src)
     # Regression (real-device report): `flatpak info` can fail silently in the

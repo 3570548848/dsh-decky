@@ -802,9 +802,15 @@ class Plugin:
         env = dict(os.environ)
         env.setdefault("DISPLAY", ":0")
         env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        # Gamescope exposes this in Gaming Mode; setting it is harmless when
-        # there is no gamescope and helpful when there is.
-        env.setdefault("WAYLAND_DISPLAY", "gamescope-0")
+        # Force the X11 route (gamescope's XWayland on :0 — the same socket
+        # Steam's own browser uses). Injecting WAYLAND_DISPLAY=gamescope-0 was
+        # a trap: a sandboxed/flatpak browser cannot reach that socket, GTK's
+        # seat comes back null and Firefox dies on
+        # `gdk_seat_get_keyboard: assertion 'GDK IS SEAT (seat)' failed`
+        # (real-device v0.1.11 log, with a minidump to prove it).
+        env.pop("WAYLAND_DISPLAY", None)
+        env["GDK_BACKEND"] = "x11"
+        env["MOZ_ENABLE_WAYLAND"] = "0"
         # On-device log (v0.1.6): the Decky service env's TMPDIR is poisoned,
         # so SteamOS' PyInstaller-packaged /usr/bin/flatpak unpacked its
         # bundled (older) OpenSSL into a mangled dir whose libs shadow the
