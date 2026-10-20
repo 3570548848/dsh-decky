@@ -83,6 +83,25 @@ BROWSER_CANDIDATES = [
     ("~/.local/bin/firefox", "firefox"),
 ]
 
+# Flatpak browsers that must be exec'd DIRECTLY, bypassing the exports/bin
+# wrapper: the wrapper is just `flatpak run <app-id>`, which fails in a Decky
+# service process (no session bus / portal). Inside the installed app tree the
+# real binary and its bundled libraries sit under files/; the loader needs
+# LD_LIBRARY_PATH pointed at lib/. (app-id, relative exe, relative lib dir).
+FLATPAK_DIRECT = [
+    ("org.mozilla.firefox", "files/lib64/firefox/firefox", "files/lib64/firefox"),
+    ("org.mozilla.firefox", "files/firefox-esr/firefox-esr", "files/firefox-esr"),
+    ("org.chromium.Chromium", "files/chromium/chrome", "files/chromium"),
+    ("com.google.Chrome", "files/google/chrome/chrome", "files/google/chrome"),
+    ("io.gitlab.librewolf-community", "files/librewolf/librewolf", "files/librewolf"),
+]
+
+# Where flatpak keeps system- and user-level app trees.
+FLATPAK_APP_ROOTS = [
+    "/var/lib/flatpak/app",
+    "~/.local/share/flatpak/app",
+]
+
 # Flatpak app ids, tried when no native browser was found. SteamOS ships
 # flatpak and many users install a browser that way.
 FLATPAK_BROWSERS = [
@@ -640,14 +659,24 @@ class Plugin:
     def _find_browser(self) -> Optional[Dict[str, str]]:
         """Locate a browser for standalone-window mode.
 
-        Returns ``{"argv": [...], "label": ...}`` where argv is the command
-        prefix (without the URL), or None when nothing usable was found.
+        Returns ``{"argv": [...], "label": ..., "env"?: {...}}`` where argv is
+        the command prefix (without the URL), or None when nothing usable was
+        found. If `env` is present the spawner must merge it into the child
+        environment.
         """
+        # 1) Flatpak browsers exec'd directly from the app tree. First because
+        #    the exports/bin wrappers are `flatpak run` in disguise, which dies
+        #    in the plugin process (exit code 1, no session bus) — real-device
+        #    report, v0.1.4.
+        direct = self._find_flatpak_direct()
+        if direct:
+            return direct
+        # 2) Native installs.
         for candidate, family in BROWSER_CANDIDATES:
             found = self._expand(candidate)
             if found:
                 return {"argv": [found], "family": family, "label": found}
-        # Flatpak fallback: `flatpak run <app-id>` exists only if flatpak does.
+        # 3) Last resort: `flatpak run <app-id>` via the CLI.
         flatpak = shutil.which("flatpak")
         if flatpak:
             for app_id, family in FLATPAK_BROWSERS:
@@ -661,22 +690,60 @@ class Plugin:
                     return {"argv": [flatpak, "run", app_id], "family": family, "label": f"flatpak:{app_id}"}
         return None
 
-    def _browser_command(self, browser: Dict[str, str], url: str) -> List[str]:
+    def _find_flatpak_direct(self) -> Optional[Dict[str, str]]:
+        """Exec a flatpak browser binary straight out of its app tree.
+
+        Skips the `flatpak run` wrapper entirely: finds the *active* deployment
+        (current/versions are symlinks into a commit hash) and returns the real
+        exe plus the LD_LIBRARY_PATH it needs to find its bundled .so files.
+        """
+        for root in FLATPAK_APP_ROOTS:
+            root_abs = os.path.expanduser(root)
+            if not os.path.isdir(root_abs):
+                continue
+            for app_id, rel_exe, rel_lib in FLATPAK_DIRECT:
+                # `active` is the canonical symlink to the running deployment;
+                # some flatpak versions only expose `current`.
+                for link_name in ("active", "current"):
+                    active = os.path.join(root_abs, app_id, link_name)
+                    if not os.path.isdir(active):
+                        continue
+                    exe = os.path.join(active, rel_exe)
+                    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+                        continue
+                    lib = os.path.join(active, rel_lib)
+                    family = "firefox" if "firefox" in rel_exe else "chromium"
+                    return {
+                        "argv": [exe],
+                        "family": family,
+                        "label": f"flatpak-direct:{app_id}",
+                        "env": {"LD_LIBRARY_PATH": lib},
+                    }
+        return None
+
+    def _browser_command(self, browser: Dict[str, str], url: str,
+                         pre_flags: Optional[List[str]] = None) -> List[str]:
         """Build the argv that opens `url` in a standalone window."""
+        head = [*browser["argv"], *(pre_flags or [])]
         if browser.get("family") == "firefox":
-            # Firefox has no --app; --kiosk gives a chrome-less fullscreen window.
-            return [*browser["argv"], "--kiosk", url]
+            # Firefox has no --app; --kiosk gives a chrome-less fullscreen
+            # window. --no-remote: without it, if any firefox is already
+            # running the new process just hands off its URL and exits —
+            # which the spawner would (rightly) report as an instant death.
+            return [*head, "--no-remote", "--kiosk", url]
         # Chromium family: --app=<url> is the documented standalone-window form.
-        return [*browser["argv"], f"--app={url}", "--start-maximized"]
+        return [*head, f"--app={url}", "--start-maximized"]
 
     @staticmethod
-    def _gui_env() -> Dict[str, str]:
+    def _gui_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """Environment for a GUI process launched from a service context.
 
         A Decky plugin runs as a service process. On a SteamOS-class system the
         display variables may not be inherited, and without them the browser
         starts headless-invisible or dies. Fill in the conventional Gaming Mode
-        values when they are absent.
+        values when they are absent. `extra` (e.g. LD_LIBRARY_PATH for a
+        direct-exec flatpak browser) is merged last and prepends, not replaces,
+        an inherited value.
         """
         env = dict(os.environ)
         env.setdefault("DISPLAY", ":0")
@@ -684,6 +751,8 @@ class Plugin:
         # Gamescope exposes this in Gaming Mode; setting it is harmless when
         # there is no gamescope and helpful when there is.
         env.setdefault("WAYLAND_DISPLAY", "gamescope-0")
+        for key, value in (extra or {}).items():
+            env[key] = f"{value}:{env[key]}" if env.get(key) else value
         return env
 
     async def open_external(self) -> Dict[str, Any]:
@@ -720,7 +789,17 @@ class Plugin:
                 ),
             }
 
-        argv = self._browser_command(browser, url)
+        # A direct-exec flatpak browser also needs a writable profile dir
+        # (its sandbox-side defaults are unavailable outside `flatpak run`).
+        child_env = dict(browser.get("env") or {})
+        pre_flags: List[str] = []
+        if str(browser.get("label", "")).startswith("flatpak-direct") and browser.get("family") == "firefox":
+            profile = os.path.join(
+                os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "dsh-decky-firefox-profile"
+            )
+            os.makedirs(profile, exist_ok=True)
+            pre_flags = [f"--profile={profile}"]
+        argv = self._browser_command(browser, url, pre_flags=pre_flags)
         decky.logger.info("opening external window: %s", " ".join(argv))
         # Capture stderr to a file: a browser that dies on launch (missing
         # session bus for flatpak run, no display access, …) otherwise fails
@@ -735,7 +814,7 @@ class Plugin:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
-                env=self._gui_env(),
+                env=self._gui_env(child_env),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=err_file if err_file else asyncio.subprocess.DEVNULL,
                 start_new_session=True,

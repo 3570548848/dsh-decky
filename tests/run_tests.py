@@ -263,6 +263,13 @@ def test_external_window_mode() -> None:
     check("flatpak export dirs scanned directly",
           "/var/lib/flatpak/exports/bin/*firefox*" in src
           and "~/.local/share/flatpak/exports/bin" in src)
+    # Regression (real-device report, v0.1.4): the exports/bin wrapper is
+    # `flatpak run` in disguise and dies with exit code 1 in the plugin
+    # process; the app-tree binary must be exec'd directly with LD_LIBRARY_PATH.
+    check("flatpak app tree exec'd directly (bypasses flatpak run)",
+          "FLATPAK_DIRECT" in src and "files/lib64/firefox/firefox" in src
+          and "LD_LIBRARY_PATH" in src and "_find_flatpak_direct" in src)
+    check("firefox gets --no-remote (no handoff-exit)", '"--no-remote"' in src)
     check("own process group for the window", "start_new_session=True" in src)
     check("close uses killpg", "killpg" in src)
     check("refuses a foreign instance instead of faking success",
