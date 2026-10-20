@@ -77,7 +77,8 @@ BROWSER_CANDIDATES = [
     # NOTE: flatpak's exports/bin/* wrappers are deliberately NOT listed —
     # they are `flatpak run` in disguise (fork + exit 0, a fake death that
     # confuses the liveness check and can double-launch). The sandboxed path
-    # is tried as `flatpak run --nofork` at the end of _all_browsers().
+    # is tried as `flatpak run` at the end of _all_browsers(); its fork-and-
+    # exit-0 semantics are accepted by the liveness check (detached_ok).
     ("~/.local/bin/firefox", "firefox"),
 ]
 
@@ -709,13 +710,15 @@ class Plugin:
                     for root in _flatpak_app_roots()
                 )
                 if installed:
-                    # --nofork: without it the CLI forks the app and exits 0
-                    # immediately — a fake death to the liveness check (real-
-                    # device v0.1.7 log).
+                    # No --nofork: this device's flatpak rejects it
+                    # ("未知选项 --nofork", v0.1.10 log). The CLI's fork-and-
+                    # exit-0 behaviour is handled by the liveness check
+                    # instead: exit 0 means the app was launched detached.
                     out.append({
-                        "argv": [flatpak, "run", "--nofork", app_id],
+                        "argv": [flatpak, "run", app_id],
                         "family": family,
                         "label": f"flatpak:{app_id}",
+                        "detached_ok": True,
                     })
         return out
 
@@ -923,6 +926,9 @@ class Plugin:
 
         # Give it a moment: if the process exits within ~2.5 s, the window
         # never had a chance to appear — that candidate is dead, move on.
+        # Exception: `detached_ok` candidates (flatpak run) legitimately fork
+        # the app and exit 0 — that IS a successful launch (v0.1.10 log: this
+        # device's flatpak rejects --nofork, so we accept the fork semantics).
         try:
             rc = await asyncio.wait_for(proc.wait(), timeout=2.5)
         except asyncio.TimeoutError:
@@ -938,7 +944,7 @@ class Plugin:
             os.unlink(err_path)
         except OSError:
             pass
-        if rc is not None:
+        if rc is not None and not (rc == 0 and browser.get("detached_ok")):
             self.log_lines.append(f"[外部窗口] {browser.get('label')} 启动即退（退出码 {rc}）")
             for line in (tail.strip() or "（无 stderr 输出）").splitlines()[:40]:
                 self.log_lines.append(f"[外部窗口] {line}")
@@ -998,18 +1004,36 @@ class Plugin:
     async def close_external(self) -> Dict[str, Any]:
         """Terminate the browser window this plugin opened, if any."""
         proc = getattr(self, "_browser_proc", None)
-        if proc is None or proc.returncode is not None:
-            self._browser_proc = None
-            return {"ok": True, "closed": False}
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception:  # noqa: BLE001
+        if proc is not None and proc.returncode is None:
             try:
-                proc.terminate()
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except Exception:  # noqa: BLE001
-                pass
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._browser_proc = None
+            return {"ok": True, "closed": True}
         self._browser_proc = None
-        return {"ok": True, "closed": True}
+        # Detached launch (flatpak run forked and exited): the CLI process is
+        # gone, but the app's argv[0] path is ours alone to know — match it
+        # precisely so a desktop Firefox never gets touched.
+        argv = getattr(self, "_browser_argv", None) or []
+        if argv and any("flatpak" in str(a) for a in argv[:1]):
+            # `flatpak run <app-id>`: the app id is the dotted, slash-free arg.
+            app_id = next((a for a in argv if "." in a and "/" not in a), "")
+            if app_id:
+                try:
+                    probe = await asyncio.create_subprocess_exec(
+                        "pkill", "-f", f"/{app_id}/",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    if await probe.wait() == 0:
+                        return {"ok": True, "closed": True}
+                except Exception:  # noqa: BLE001
+                    pass
+        return {"ok": True, "closed": False}
 
     # ------------------------------------------------------------------
     # Environment probes
