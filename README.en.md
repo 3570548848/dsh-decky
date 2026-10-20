@@ -118,6 +118,35 @@ requirement of Decky's installer, which does `extractall` straight into `~/homeb
 - **`danger-full-access` is a documented escape hatch**, not a default. It removes file confinement
   for every command the agent runs; enable it only when no sandbox runner is usable.
 
+## Version history
+
+### v0.1.15 — the engine environment is no longer shadowed by PyInstaller
+
+**Symptom**: the dsh engine boots and the GUI opens, but config **sync** fails —
+
+```
+reading the remote snapshot failed: git clone https://github.com/<user>/<repo>.git failed (exit 128)
+… /_MEI0000054cWWSwqE/libssl.so.3: version `OPENSSL_3.5.0' not found
+   (required by /usr/lib/libcurl.so.4) …
+fatal: remote helper 'https' aborted session
+```
+
+**Cause**: SteamOS ships `/usr/bin/flatpak` as a PyInstaller one-file binary; it unpacks its bundled (older) OpenSSL into `$TMPDIR/_MEIxxxxxx/`. The Decky service process's `LD_LIBRARY_PATH` points into such a directory, so **every child process** (node, git, git-remote-https) resolves libssl from there and aborts on the version check. v0.1.6 already fixed exactly this trap — but only for the **browser** spawn (`_gui_env`); the **engine** spawn (`_build_env`) still copied `os.environ` verbatim. The engine lived, and the git underneath it died.
+
+**Fix**: sanitising moved to the outermost boundary, `_sanitize_inherited_env()`, used by both spawn paths. It is both narrower and more thorough than v0.1.6:
+
+- inside `LD_LIBRARY_PATH` / `LD_PRELOAD` it removes **only** entries pointing at `_MEI…` and directories that no longer exist — a value you set deliberately survives (v0.1.6 dropped the whole variable);
+- if nothing is left, the variable is **removed** rather than left empty (an empty entry means "current directory" to the loader);
+- `TMPDIR` is replaced with `/tmp` only when it is a `_MEI` dir, unwritable, or missing.
+
+**If you are stuck right now**: upgrade the plugin and restart the engine (the plugin changes the launch environment; it cannot take effect without a restart). As a manual stopgap:
+
+```bash
+env -u LD_LIBRARY_PATH TMPDIR=/tmp <your usual dsh command> --profile web --no-open --port 3080
+```
+
+or switch the config manager's sync transport from **Git** to **Gist / WebDAV** — those go through Node's HTTPS and never spawn `git`, sidestepping the dynamic loader entirely.
+
 ## Known limits
 
 - **The UI is not rendered inside the Decky panel** (neither mode embeds it) — `SameSite=Strict`

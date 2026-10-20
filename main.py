@@ -173,6 +173,69 @@ NODE_GLOBAL_PREFIXES = [
 ]
 
 
+# PyInstaller one-file binaries unpack their bundled (older) shared libraries
+# into a throwaway directory named `_MEIxxxxxx` under $TMPDIR. On a SteamOS-
+# class system the Decky service process inherits a TMPDIR that points somewhere
+# such a directory already lives, and the *inherited* LD_LIBRARY_PATH carries
+# that path — so every child we spawn resolves libssl/libcrypto/libcurl from it
+# instead of from the system. Symptom (real-device v0.1.15 report, both engines
+# and browsers): `version 'OPENSSL_3.5.0' not found (required by
+# /usr/lib/libcurl.so.4)` followed by `remote helper 'https' aborted session`,
+# i.e. the dsh engine boots but *its* `git` cannot clone the sync repo.
+#
+# v0.1.6 fixed exactly this for the browser spawn (`_gui_env`), but the engine
+# spawn (`_build_env`) kept `dict(os.environ)` — so the poison reached node and
+# every helper binary under it. The rule this encodes: sanitise at the outermost
+# boundary (there is exactly one env that every child inherits), not per feature.
+_PYINSTALLER_TMP_RE = re.compile(r"(^|/)_MEI[^/]*(/|$)")
+
+# Variables that make the dynamic loader (and the loader's own children) search
+# paths we did not choose. Only the *entries* that point at a PyInstaller temp
+# dir (or at a directory that no longer exists) are dropped — a legitimate
+# value someone set deliberately is preserved.
+_LOADER_PATH_VARS = ("LD_LIBRARY_PATH", "LD_PRELOAD")
+
+
+def _sanitize_inherited_env(env: Dict[str, str]) -> Dict[str, str]:
+    """Strip inherited loader paths that shadow the system libraries.
+
+    Returns the same dict, mutated in place, so callers can chain it.
+    """
+    for key in _LOADER_PATH_VARS:
+        raw = env.get(key)
+        if not raw:
+            continue
+        kept: List[str] = []
+        for entry in raw.split(os.pathsep):
+            if entry == "":
+                continue
+            if _PYINSTALLER_TMP_RE.search(entry):
+                continue
+            # A vanished directory is just as harmful: the loader warns and
+            # keeps searching, which is how the wrong libssl got picked once the
+            # PyInstaller process that created it had already exited.
+            if not os.path.exists(entry):
+                continue
+            kept.append(entry)
+        if kept:
+            env[key] = os.pathsep.join(kept)
+        else:
+            env.pop(key, None)
+    # Pin TMPDIR to a real, writable, non-PyInstaller location. Keep an
+    # inherited value only when it is writable and not one of those dirs.
+    inherited_tmp = env.get("TMPDIR") or ""
+    if (
+        inherited_tmp
+        and not _PYINSTALLER_TMP_RE.search(inherited_tmp)
+        and os.path.isdir(inherited_tmp)
+        and os.access(inherited_tmp, os.W_OK)
+    ):
+        env["TMPDIR"] = inherited_tmp
+    else:
+        env["TMPDIR"] = "/tmp"
+    return env
+
+
 class Plugin:
     """Decky plugin lifecycle object. Public methods are callable from the UI."""
 
@@ -456,6 +519,12 @@ class Plugin:
 
     def _build_env(self, resolved: Dict[str, Optional[str]]) -> Dict[str, str]:
         env = dict(os.environ)
+        # v0.1.15: the engine inherits its environment to *every* helper it
+        # spawns — git for the config sync above all. A PyInstaller-shadowed
+        # LD_LIBRARY_PATH therefore breaks `git clone` with
+        # `version 'OPENSSL_3.5.0' not found` even though the engine itself is
+        # healthy (v0.1.6 fixed only the browser path; see _sanitize_inherited_env).
+        _sanitize_inherited_env(env)
         node = resolved.get("node")
         if node:
             # The engine resolves helper binaries from PATH; put the discovered
@@ -822,14 +891,13 @@ class Plugin:
         env.pop("WAYLAND_DISPLAY", None)
         env["GDK_BACKEND"] = "x11"
         env["MOZ_ENABLE_WAYLAND"] = "0"
-        # On-device log (v0.1.6): the Decky service env's TMPDIR is poisoned,
-        # so SteamOS' PyInstaller-packaged /usr/bin/flatpak unpacked its
-        # bundled (older) OpenSSL into a mangled dir whose libs shadow the
-        # system ones — every run died with `version 'OPENSSL 3.5.0' not
-        # found`. Pin TMPDIR to the real /tmp and drop any inherited
-        # LD_LIBRARY_PATH shadowing (candidates that need it set their own).
-        env["TMPDIR"] = "/tmp"
-        env.pop("LD_LIBRARY_PATH", None)
+        # v0.1.6 found the PyInstaller/TMPDIR poisoning here first; v0.1.15 moved
+        # the rule into _sanitize_inherited_env so the engine spawn gets it too,
+        # and refined it from "drop LD_LIBRARY_PATH wholesale" to "drop only the
+        # entries that shadow / vanished" — a value set deliberately survives.
+        # (Candidates that need one, e.g. the flatpak app tree, add their own
+        # through `extra`, which is merged last and prepends.)
+        _sanitize_inherited_env(env)
         # `flatpak run` needs the session bus (portals); a systemd user
         # instance always owns this socket, and the Decky service process just
         # never inherits the address. Its absence was the exit-1 cause.

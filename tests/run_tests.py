@@ -109,6 +109,82 @@ async def test_argv() -> None:
           argv[-2:] == ["--trusted-host", "my host"], str(argv[-2:]))
 
 
+async def test_engine_env_sanitised() -> None:
+    """The engine must not inherit PyInstaller-shadowed loader paths.
+
+    Real-device v0.1.15 report: the engine booted fine, then *its* `git clone`
+    for the config sync died with
+    `version 'OPENSSL_3.5.0' not found (required by /usr/lib/libcurl.so.4)` /
+    `remote helper 'https' aborted session`. Cause: the Decky service env's
+    LD_LIBRARY_PATH pointed at a PyInstaller `_MEI…/` dir whose bundled OpenSSL
+    shadowed the system one. v0.1.6 had fixed this for the browser spawn only —
+    `_build_env` still copied `os.environ` verbatim, so node and every helper
+    under it stayed poisoned.
+
+    These checks pin the rule rather than the incident: the *engine* env (the
+    one every child inherits) drops shadowing/vanished entries, keeps a
+    legitimate one, and always has a usable TMPDIR.
+    """
+    print("\nEngine env sanitisation")
+    p = main.Plugin()
+    p._config = p._load_config()
+
+    scratch = tempfile.mkdtemp(prefix="dsh-decky-env-")
+    mei = os.path.join(scratch, "_MEI0000054cWWSwqE")
+    os.mkdir(mei)
+    legit = os.path.join(scratch, "legit-libs")
+    os.mkdir(legit)
+    gone = os.path.join(scratch, "vanished")
+
+    saved = {k: os.environ.get(k) for k in ("LD_LIBRARY_PATH", "LD_PRELOAD", "TMPDIR")}
+    try:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([mei, legit, gone])
+        os.environ["LD_PRELOAD"] = os.path.join(mei, "libtermux-exec-ld-preload.so")
+        # A poisoned TMPDIR (the PyInstaller dir itself) must not survive.
+        os.environ["TMPDIR"] = mei
+
+        env = p._build_env({"node": None})
+
+        check("PyInstaller _MEI entry is dropped from LD_LIBRARY_PATH",
+              "_MEI" not in env.get("LD_LIBRARY_PATH", ""), env.get("LD_LIBRARY_PATH"))
+        check("a vanished directory is dropped too",
+              "vanished" not in env.get("LD_LIBRARY_PATH", ""), env.get("LD_LIBRARY_PATH"))
+        check("a legitimate LD_LIBRARY_PATH entry survives",
+              legit in env.get("LD_LIBRARY_PATH", "").split(os.pathsep),
+              env.get("LD_LIBRARY_PATH"))
+        check("LD_PRELOAD pointing into _MEI is dropped",
+              "LD_PRELOAD" not in env or "_MEI" not in env["LD_PRELOAD"],
+              env.get("LD_PRELOAD"))
+        check("poisoned TMPDIR is replaced", env.get("TMPDIR") == "/tmp", env.get("TMPDIR"))
+
+        # An entirely shadowed LD_LIBRARY_PATH must be removed, not left empty
+        # (an empty entry means "the current directory" to the loader).
+        os.environ["LD_LIBRARY_PATH"] = mei
+        env = p._build_env({"node": None})
+        check("a wholly shadowed LD_LIBRARY_PATH is removed",
+              "LD_LIBRARY_PATH" not in env, env.get("LD_LIBRARY_PATH"))
+
+        # A deliberately-set, writable, non-_MEI TMPDIR is honoured.
+        os.environ.pop("LD_LIBRARY_PATH", None)
+        os.environ["TMPDIR"] = legit
+        env = p._build_env({"node": None})
+        check("a sane inherited TMPDIR is kept", env.get("TMPDIR") == legit, env.get("TMPDIR"))
+
+        # The browser path shares the same rule (it was where the bug was first
+        # found), so a _MEI-only LD_LIBRARY_PATH must vanish there as well.
+        os.environ["LD_LIBRARY_PATH"] = mei
+        genv = p._gui_env()
+        check("the GUI env applies the same sanitisation",
+              "LD_LIBRARY_PATH" not in genv, genv.get("LD_LIBRARY_PATH"))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 async def test_lifecycle() -> None:
     print("\nLifecycle")
     p = main.Plugin()
@@ -377,6 +453,7 @@ def main_entry() -> int:
         test_url_regex,
         test_config,
         test_argv,
+        test_engine_env_sanitised,
         test_lifecycle,
         test_death_before_url,
         test_foreign_instance_is_never_killed,

@@ -99,6 +99,35 @@ curl -L -o dsh-decky.zip \
 - **不读取、不存储任何凭据。** 插件从不打开 `~/.dsh` 里的密钥；启动令牌只是从引擎 stdout 解析出来交给浏览器。
 - **`danger-full-access` 是有文档说明的应急出口**，不是默认值。它会解除 Agent 每条命令的文件约束，只应在沙箱执行器确实不可用时启用。
 
+## 版本与更新记录
+
+### v0.1.15 · 引擎环境不再被 PyInstaller 污染
+
+**症状**：DSH 引擎正常起来了，界面也能开，但配置管理的**同步**失败——
+
+```
+读取远端快照失败：git clone https://github.com/<user>/<repo>.git 失败 (exit 128)
+… /_MEI0000054cWWSwqE/libssl.so.3: version `OPENSSL_3.5.0' not found
+   (required by /usr/lib/libcurl.so.4) …
+致命错误：remote helper 'https' aborted session
+```
+
+**根因**：SteamOS 的 `/usr/bin/flatpak` 是 PyInstaller 打包的，它把自己的旧 OpenSSL 解包到 `$TMPDIR/_MEIxxxxxx/`。Decky 服务进程的 `LD_LIBRARY_PATH` 恰好指向那种目录，于是**所有子进程**（node、git、git-remote-https）都优先从那里加载 libssl，版本不够就 abort。v0.1.6 修过一模一样的坑，但只修了「启动浏览器的环境」（`_gui_env`），**启动引擎的环境**（`_build_env`）仍然原样继承 `os.environ` —— 引擎活了，它下面的 git 死了。
+
+**修法**：把清洗提到最外层统一入口 `_sanitize_inherited_env()`，引擎与浏览器两条 spawn 路径都走它。它比 v0.1.6 更克制也更彻底：
+
+- `LD_LIBRARY_PATH` / `LD_PRELOAD` 里**只删**指向 `_MEI…` 的条目和已不存在的目录，**你手动设的合法值会被保留**（v0.1.6 是整条变量丢掉）；
+- 整条都被遮蔽时**移除变量**而不是留空（空条目在加载器语义里等于「当前目录」）；
+- `TMPDIR` 只在「是 `_MEI` 目录 / 不可写 / 不存在」时才换成 `/tmp`，合理值不动。
+
+**如果你现在就卡在这**：升级本插件并重启引擎即可（插件改的是启动环境，不重启不生效）。临时应急也可以手动：
+
+```bash
+env -u LD_LIBRARY_PATH TMPDIR=/tmp <原来的 dsh 启动命令> --profile web --no-open --port 3080
+```
+
+或者把配置管理的同步通道从 **Git** 换成 **Gist / WebDAV** —— 那两条走 Node 的 HTTPS，根本不 spawn `git`，绕开动态链接器。
+
 ## 已知限制
 
 - **界面不在 Decky 面板内**（方式 A/B 都不是内嵌）——`SameSite=Strict` 排除了 iframe。这是 dsh 鉴权模型的必然结果。
