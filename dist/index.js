@@ -150,15 +150,20 @@ async function openGui(url, mode) {
     }
     toaster.toast({ title: "打开失败", body: errors.join(" | ") });
 }
-function Row({ label, value, warn }) {
-    return (SP_JSX.jsx(DFL.Field, { label: label, childrenLayout: "below", bottomSeparator: "none", children: SP_JSX.jsx("div", { style: {
-                fontFamily: "monospace",
-                fontSize: "0.8em",
-                wordBreak: "break-all",
-                paddingTop: "2px",
-                paddingBottom: "6px",
-                color: warn ? "#ff8a80" : undefined,
-            }, children: value }) }));
+function Row({ label, value, warn, description }) {
+    return (SP_JSX.jsxs(DFL.Field, { label: label, childrenLayout: "below", bottomSeparator: "none", children: [SP_JSX.jsx("div", { style: {
+                    fontFamily: "monospace",
+                    fontSize: "0.8em",
+                    wordBreak: "break-all",
+                    paddingTop: "2px",
+                    paddingBottom: "6px",
+                    color: warn ? "#ff8a80" : undefined,
+                }, children: value }), description && (SP_JSX.jsx("div", { style: {
+                    fontSize: "0.7em",
+                    wordBreak: "break-all",
+                    opacity: 0.8,
+                    paddingBottom: "6px",
+                }, children: description }))] }));
 }
 // ---------------------------------------------------------------------------
 // Content
@@ -323,7 +328,15 @@ function Content() {
                             }, children: busy === "bp" ? "探测中…" : "探测可用浏览器" }) })), (cfg?.config?.open_with ?? "builtin") === "external" && browserInfo && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(Row, { label: "\u6D4F\u89C8\u5668", value: browserInfo.found
                                 ? `${browserInfo.label}（${browserInfo.family}）`
                                 : `未找到。已查找：${(browserInfo.candidates ?? []).join("、")}` +
-                                    (browserInfo.flatpak ? "（flatpak 可用但无匹配应用）" : "（flatpak 未安装）"), warn: !browserInfo.found }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u968F\u63D2\u4EF6\u52A0\u8F7D\u81EA\u52A8\u542F\u52A8", description: "\u63D2\u4EF6\u52A0\u8F7D\u65F6\u540E\u53F0\u62C9\u8D77\u5F15\u64CE\uFF08\u4ECD\u9700\u624B\u52A8\u6253\u5F00\u754C\u9762\uFF09", checked: Boolean(cfg?.config?.autostart), onChange: (v) => patch({ autostart: v }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u663E\u793A\u9AD8\u7EA7\u8BBE\u7F6E", checked: showAdvanced, onChange: setShowAdvanced }) }), showAdvanced && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Node \u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.node_path ?? "", onChange: (e) => patch({ node_path: e.target.value }), description: "\u4F8B\u5982 /home/deck/.local/bin/node" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "dsh \u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.dsh_path ?? "", onChange: (e) => patch({ dsh_path: e.target.value }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u5DE5\u4F5C\u76EE\u5F55", value: cfg?.config?.workdir ?? "", onChange: (e) => patch({ workdir: e.target.value }), description: "Agent \u7684\u9ED8\u8BA4\u5DE5\u4F5C\u533A\uFF1B\u7559\u7A7A\u7528 $HOME" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u6743\u9650\u6863\u4F4D\uFF08DSH_PERMISSION_MODE\uFF09", value: cfg?.config?.permission_mode ?? "", onChange: (e) => patch({ permission_mode: e.target.value }), description: "\u7559\u7A7A\u7528 DSH \u9ED8\u8BA4\uFF1B\u6C99\u7BB1\u4E0D\u53EF\u7528\u65F6\u8BBE\u4E3A danger-full-access" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "\u6743\u9650\u6863\u4F4D\u9884\u8BBE", rgOptions: [
+                                    (browserInfo.flatpak ? "（flatpak 可用但无匹配应用）" : "（flatpak 未安装）"), description: browserInfo.found
+                                ? undefined
+                                : browserInfo.diag
+                                    ? `插件 HOME=${browserInfo.diag.home}（uid=${browserInfo.diag.uid}）；flatpak 根目录：` +
+                                        browserInfo.diag.flatpak_roots
+                                            .map((r) => `${r.path}${r.exists ? `=[${(r.apps ?? []).join(",")}]` : "=不存在"}`)
+                                            .join("；") +
+                                        "。可在高级设置手填浏览器路径。"
+                                    : undefined, warn: !browserInfo.found }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u968F\u63D2\u4EF6\u52A0\u8F7D\u81EA\u52A8\u542F\u52A8", description: "\u63D2\u4EF6\u52A0\u8F7D\u65F6\u540E\u53F0\u62C9\u8D77\u5F15\u64CE\uFF08\u4ECD\u9700\u624B\u52A8\u6253\u5F00\u754C\u9762\uFF09", checked: Boolean(cfg?.config?.autostart), onChange: (v) => patch({ autostart: v }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u663E\u793A\u9AD8\u7EA7\u8BBE\u7F6E", checked: showAdvanced, onChange: setShowAdvanced }) }), showAdvanced && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Node \u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.node_path ?? "", onChange: (e) => patch({ node_path: e.target.value }), description: "\u4F8B\u5982 /home/deck/.local/bin/node" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "dsh \u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.dsh_path ?? "", onChange: (e) => patch({ dsh_path: e.target.value }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u6D4F\u89C8\u5668\u8DEF\u5F84\uFF08\u7559\u7A7A=\u81EA\u52A8\u67E5\u627E\uFF09", value: cfg?.config?.browser_path ?? "", onChange: (e) => patch({ browser_path: e.target.value }), description: "\u81EA\u52A8\u63A2\u6D4B\u627E\u4E0D\u5230\u65F6\u624B\u586B\u53EF\u6267\u884C\u6587\u4EF6\u5168\u8DEF\u5F84\uFF0C\u5982 /var/lib/flatpak/exports/bin/org.mozilla.firefox" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u5DE5\u4F5C\u76EE\u5F55", value: cfg?.config?.workdir ?? "", onChange: (e) => patch({ workdir: e.target.value }), description: "Agent \u7684\u9ED8\u8BA4\u5DE5\u4F5C\u533A\uFF1B\u7559\u7A7A\u7528 $HOME" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "\u6743\u9650\u6863\u4F4D\uFF08DSH_PERMISSION_MODE\uFF09", value: cfg?.config?.permission_mode ?? "", onChange: (e) => patch({ permission_mode: e.target.value }), description: "\u7559\u7A7A\u7528 DSH \u9ED8\u8BA4\uFF1B\u6C99\u7BB1\u4E0D\u53EF\u7528\u65F6\u8BBE\u4E3A danger-full-access" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "\u6743\u9650\u6863\u4F4D\u9884\u8BBE", rgOptions: [
                                         { data: "", label: "（留空，用 DSH 默认）" },
                                         { data: "danger-full-access", label: "danger-full-access（绕过沙箱）" },
                                         { data: "workspace-write", label: "workspace-write" },

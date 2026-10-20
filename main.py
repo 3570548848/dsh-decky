@@ -94,11 +94,18 @@ FLATPAK_DIRECT = [
     ("io.gitlab.librewolf-community", "files/librewolf/librewolf", "files/librewolf"),
 ]
 
-# Where flatpak keeps system- and user-level app trees.
-FLATPAK_APP_ROOTS = [
-    "/var/lib/flatpak/app",
-    "~/.local/share/flatpak/app",
-]
+# Where flatpak keeps system- and user-level app trees. The glob form covers
+# the Decky case where the plugin's $HOME is not the desktop user's home:
+# every /home/* gets scanned. (real-device v0.1.9: both fixed roots missed.)
+def _flatpak_app_roots() -> List[str]:
+    import glob as _glob
+
+    roots = ["/var/lib/flatpak/app", "~/.local/share/flatpak/app"]
+    roots.extend(_glob.glob("/home/*/.local/share/flatpak/app"))
+    return [os.path.expanduser(r) for r in roots]
+
+
+FLATPAK_APP_ROOTS = ["/var/lib/flatpak/app", "~/.local/share/flatpak/app"]
 
 # Flatpak app ids, tried when no native browser was found. SteamOS ships
 # flatpak and many users install a browser that way.
@@ -226,6 +233,7 @@ class Plugin:
             "extra_args": "",
             "autostart": False,
             "open_with": "external",
+            "browser_path": "",
         }
         try:
             with open(self._config_path, "r", encoding="utf-8") as handle:
@@ -269,6 +277,7 @@ class Plugin:
             "extra_args",
             "autostart",
             "open_with",
+            "browser_path",
         }
         for key, value in (patch or {}).items():
             if key in allowed and value is not None:
@@ -669,6 +678,16 @@ class Plugin:
         runtime libs, so no single candidate is trustworthy on its own.
         """
         out: List[Dict[str, str]] = []
+        # 0) Escape hatch: a user-configured browser path wins outright (the
+        #    auto-detectors can miss installs under rewritten HOMEs).
+        configured = (self._config.get("browser_path") or "").strip()
+        if configured:
+            found = self._expand(configured)
+            if found:
+                fam = "firefox" if "firefox" in os.path.basename(found) else "chromium"
+                out.append({"argv": [found], "family": fam, "label": found})
+            else:
+                self.log_lines.append(f"[外部窗口] 配置的浏览器路径不可执行：{configured}")
         # 1) Flatpak direct exec of the real binary (no sandbox, no bus needed).
         direct = self._find_flatpak_direct()
         if direct:
@@ -686,8 +705,8 @@ class Plugin:
         if flatpak:
             for app_id, family in FLATPAK_BROWSERS:
                 installed = any(
-                    os.path.isdir(os.path.join(os.path.expanduser(root), "app", app_id))
-                    for root in FLATPAK_APP_ROOTS
+                    os.path.isdir(os.path.join(root, app_id))
+                    for root in _flatpak_app_roots()
                 )
                 if installed:
                     # --nofork: without it the CLI forks the app and exits 0
@@ -709,16 +728,15 @@ class Plugin:
         freedesktop runtime's libs (GTK etc. live in the runtime tree, not the
         app tree; without them the bare binary exits 1, real-device v0.1.5).
         """
-        for root in FLATPAK_APP_ROOTS:
-            root_abs = os.path.expanduser(root)
-            if not os.path.isdir(root_abs):
+        for root in _flatpak_app_roots():
+            if not os.path.isdir(root):
                 continue
-            runtime_root = os.path.join(os.path.dirname(root_abs), "runtime")
+            runtime_root = os.path.join(os.path.dirname(root), "runtime")
             for app_id, rel_exe, rel_lib in FLATPAK_DIRECT:
                 # `active` is the canonical symlink to the running deployment;
                 # some flatpak versions only expose `current`.
                 for link_name in ("active", "current"):
-                    active = os.path.join(root_abs, app_id, link_name)
+                    active = os.path.join(root, app_id, link_name)
                     if not os.path.isdir(active):
                         continue
                     exe = os.path.join(active, rel_exe)
@@ -947,10 +965,28 @@ class Plugin:
         """Report which browser would be used, for the settings panel."""
         browser = self._find_browser()
         if browser is None:
+            # Diagnostics for the "installed but not found" chase: show the
+            # plugin's real HOME and what flatpak roots actually exist there
+            # (Decky rewrites HOME; a desktop-installed flatpak may hide under
+            # a different /home/*).
+            roots = []
+            for root in _flatpak_app_roots():
+                entry = {"path": root, "exists": os.path.isdir(root)}
+                if entry["exists"]:
+                    try:
+                        entry["apps"] = sorted(os.listdir(root))[:12]
+                    except OSError as exc:
+                        entry["error"] = str(exc)[:80]
+                roots.append(entry)
             return {
                 "found": False,
                 "candidates": [c for c, _ in BROWSER_CANDIDATES],
-                "flatpak": shutil.which("flatpak") is not None,
+                "flatpak": shutil.which("flatpak") is not None or os.path.exists("/usr/bin/flatpak"),
+                "diag": {
+                    "home": os.environ.get("HOME", ""),
+                    "uid": os.getuid(),
+                    "flatpak_roots": roots,
+                },
             }
         return {
             "found": True,

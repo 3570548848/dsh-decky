@@ -35,6 +35,7 @@ type ConfigShape = {
   extra_args: string;
   autostart: boolean;
   open_with: string;
+  browser_path: string;
 };
 
 type ConfigReply = {
@@ -94,6 +95,7 @@ const browserProbe = callable<[], {
   argv?: string[];
   flatpak?: boolean;
   candidates?: string[];
+  diag?: { home: string; uid: number; flatpak_roots: Array<{ path: string; exists: boolean; apps?: string[]; error?: string }> };
 }>("browser_probe");
 const probeEnv = callable<[], ProbeReply>("probe");
 
@@ -153,7 +155,7 @@ async function openGui(url: string, mode: string): Promise<void> {
   toaster.toast({ title: "打开失败", body: errors.join(" | ") });
 }
 
-function Row({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
+function Row({ label, value, warn, description }: { label: string; value: string; warn?: boolean; description?: string }) {
   return (
     <Field label={label} childrenLayout="below" bottomSeparator="none">
       <div
@@ -168,6 +170,18 @@ function Row({ label, value, warn }: { label: string; value: string; warn?: bool
       >
         {value}
       </div>
+      {description && (
+        <div
+          style={{
+            fontSize: "0.7em",
+            wordBreak: "break-all",
+            opacity: 0.8,
+            paddingBottom: "6px",
+          }}
+        >
+          {description}
+        </div>
+      )}
     </Field>
   );
 }
@@ -189,6 +203,7 @@ function Content() {
     family?: string;
     flatpak?: boolean;
     candidates?: string[];
+    diag?: { home: string; uid: number; flatpak_roots: Array<{ path: string; exists: boolean; apps?: string[]; error?: string }> };
   } | null>(null);
 
   const refresh = async () => {
@@ -504,6 +519,17 @@ function Content() {
                   : `未找到。已查找：${(browserInfo.candidates ?? []).join("、")}` +
                     (browserInfo.flatpak ? "（flatpak 可用但无匹配应用）" : "（flatpak 未安装）")
               }
+              description={
+                browserInfo.found
+                  ? undefined
+                  : browserInfo.diag
+                    ? `插件 HOME=${browserInfo.diag.home}（uid=${browserInfo.diag.uid}）；flatpak 根目录：` +
+                      browserInfo.diag.flatpak_roots
+                        .map((r) => `${r.path}${r.exists ? `=[${(r.apps ?? []).join(",")}]` : "=不存在"}`)
+                        .join("；") +
+                      "。可在高级设置手填浏览器路径。"
+                    : undefined
+              }
               warn={!browserInfo.found}
             />
           </PanelSectionRow>
@@ -539,6 +565,14 @@ function Content() {
                 label="dsh 路径（留空=自动查找）"
                 value={cfg?.config?.dsh_path ?? ""}
                 onChange={(e) => patch({ dsh_path: e.target.value })}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <TextField
+                label="浏览器路径（留空=自动查找）"
+                value={cfg?.config?.browser_path ?? ""}
+                onChange={(e) => patch({ browser_path: e.target.value })}
+                description="自动探测找不到时手填可执行文件全路径，如 /var/lib/flatpak/exports/bin/org.mozilla.firefox"
               />
             </PanelSectionRow>
             <PanelSectionRow>
